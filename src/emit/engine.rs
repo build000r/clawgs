@@ -567,8 +567,11 @@ fn complete_session_thought(
 ) -> Option<String> {
     match model_client.complete(prompt, request.config.model_override()) {
         Ok(value) => Some(value),
-        Err(_) => {
+        Err(err) => {
             metrics.suppressed += 1;
+            if metrics.last_backend_error.is_none() {
+                metrics.last_backend_error = Some(err);
+            }
             state.last_terminal_context = Some(trim_terminal_context(&session.replay_text));
             None
         }
@@ -1609,10 +1612,29 @@ mod tests {
         }
     }
 
+    struct FailingModelClient {
+        error: String,
+    }
+
+    impl ModelClient for FailingModelClient {
+        fn complete(&self, _prompt: &str, _model_override: Option<&str>) -> Result<String, String> {
+            Err(self.error.clone())
+        }
+    }
+
     fn mock_engine(response: &str) -> EmitEngine {
         EmitEngine::with_backend(
             Box::new(MockModelClient {
                 response: response.to_string(),
+            }),
+            ModelBackend::OpenRouter,
+        )
+    }
+
+    fn failing_engine(error: &str) -> EmitEngine {
+        EmitEngine::with_backend(
+            Box::new(FailingModelClient {
+                error: error.to_string(),
             }),
             ModelBackend::OpenRouter,
         )
@@ -1706,6 +1728,27 @@ mod tests {
         let second_result = engine.sync(&second);
         assert_eq!(second_result.updates.len(), 0);
         assert!(second_result.metrics.suppressed > 0);
+    }
+
+    #[test]
+    fn model_completion_error_sets_last_backend_error() {
+        let now = Utc::now();
+        let mut engine = failing_engine("codex exec failed: not authenticated");
+
+        let request = SyncRequest {
+            id: "req-1".to_string(),
+            now,
+            config: ThoughtConfig::default(),
+            sessions: vec![sample_session(now)],
+        };
+
+        let result = engine.sync(&request);
+        assert!(result.updates.is_empty());
+        assert_eq!(
+            result.metrics.last_backend_error.as_deref(),
+            Some("codex exec failed: not authenticated")
+        );
+        assert!(result.metrics.suppressed > 0);
     }
 
     #[test]

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const OPENROUTER_TIMEOUT: Duration = Duration::from_secs(15);
 const CODEX_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 const CLAUDE_CLI_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/free";
 const DEFAULT_CODEX_CLI_MODEL: &str = "gpt-5.1-codex-mini";
 const DEFAULT_CODEX_CLI_REASONING: &str = "low";
 const DEFAULT_CODEX_CLI_VERBOSITY: &str = "low";
@@ -422,7 +423,7 @@ fn configured_models(backend: ModelBackend) -> Vec<String> {
 
 fn backend_default_model(backend: ModelBackend) -> Option<&'static str> {
     match backend {
-        ModelBackend::OpenRouter => None,
+        ModelBackend::OpenRouter => Some(DEFAULT_OPENROUTER_MODEL),
         ModelBackend::CodexCli => Some(DEFAULT_CODEX_CLI_MODEL),
         ModelBackend::ClaudeCli => Some(DEFAULT_CLAUDE_CLI_MODEL),
     }
@@ -470,14 +471,30 @@ fn call_openrouter(
     prompt: &str,
     model: &str,
     api_key: &str,
-) -> Result<String, String> {
-    let body = serde_json::json!({
+) -> Result<Option<String>, String> {
+    call_openrouter_with_reasoning_mode(client, prompt, model, api_key, false)
+}
+
+fn call_openrouter_with_reasoning_mode(
+    client: &reqwest::blocking::Client,
+    prompt: &str,
+    model: &str,
+    api_key: &str,
+    suppress_reasoning: bool,
+) -> Result<Option<String>, String> {
+    let mut body = serde_json::json!({
         "model": model,
         "max_tokens": 80,
         "messages": [
             { "role": "user", "content": prompt }
         ]
     });
+    if suppress_reasoning {
+        body["reasoning"] = serde_json::json!({
+            "effort": "none",
+            "exclude": true
+        });
+    }
 
     let response = client
         .post("https://openrouter.ai/api/v1/chat/completions")
@@ -501,11 +518,29 @@ fn call_openrouter(
         .json()
         .map_err(|error| format!("json parse failed: {error}"))?;
 
-    Ok(body["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("")
-        .trim()
-        .to_string())
+    Ok(extract_openrouter_content(&body))
+}
+
+fn extract_openrouter_content(body: &serde_json::Value) -> Option<String> {
+    let content = &body["choices"][0]["message"]["content"];
+    if let Some(text) = content.as_str() {
+        let text = text.trim();
+        return (!text.is_empty()).then(|| text.to_string());
+    }
+
+    let parts = content
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("text").and_then(|text| text.as_str()))
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
 }
 
 fn nonempty_env_var(key: &str) -> Option<String> {
@@ -541,11 +576,13 @@ fn nonempty_openrouter_response(
     model: &str,
     api_key: &str,
 ) -> Result<String, String> {
-    let content = call_openrouter(client, prompt, model, api_key)?;
-    if content.is_empty() {
-        Err("returned empty".to_string())
-    } else {
-        Ok(content)
+    if let Some(content) = call_openrouter(client, prompt, model, api_key)? {
+        return Ok(content);
+    }
+
+    match call_openrouter_with_reasoning_mode(client, prompt, model, api_key, true) {
+        Ok(Some(content)) => Ok(content),
+        Ok(None) | Err(_) => Err("returned empty".to_string()),
     }
 }
 
@@ -596,6 +633,18 @@ mod tests {
         let model = default_model_for_backend(ModelBackend::CodexCli);
 
         assert_eq!(model, "gpt-5.1-codex-mini");
+    }
+
+    #[test]
+    fn openrouter_backend_falls_back_to_router_default_model() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        std::env::remove_var("SWIMMERS_THOUGHT_MODEL");
+        std::env::remove_var("SWIMMERS_THOUGHT_MODEL_2");
+        std::env::remove_var("SWIMMERS_THOUGHT_MODEL_3");
+
+        let model = default_model_for_backend(ModelBackend::OpenRouter);
+
+        assert_eq!(model, "openrouter/free");
     }
 
     #[test]

@@ -45,6 +45,7 @@ struct SessionRuntimeState {
     objective_fingerprint: Option<String>,
     objective_stable_since: DateTime<Utc>,
     claimed_jsonl_path: Option<PathBuf>,
+    claimed_cwd: Option<String>,
     emission_seq: u64,
 }
 
@@ -73,6 +74,7 @@ impl SessionRuntimeState {
             objective_fingerprint: session.objective_fingerprint.clone(),
             objective_stable_since: thought_updated_at,
             claimed_jsonl_path: None,
+            claimed_cwd: None,
             emission_seq: 0,
         }
     }
@@ -316,13 +318,28 @@ fn process_session(
         .entry(session.session_id.clone())
         .or_insert_with(|| SessionRuntimeState::initialize_from_session(session, request.now));
     let next_rest_state = rest_state_for_session(session, request.now);
+
+    // Invalidate stale claim when the pane's CWD has changed (e.g. new
+    // claude session started in a different project within the same pane).
+    if state
+        .claimed_cwd
+        .as_deref()
+        .is_some_and(|prev| prev != session.cwd)
+    {
+        state.claimed_jsonl_path = None;
+        state.claimed_cwd = None;
+    }
+
     let (context_snapshot, resolved_path) = context_snapshot_for_session_with_claim(
         session,
         state.claimed_jsonl_path.as_deref(),
         transcript_group_is_ambiguous(session, transcript_group_counts),
     );
     let context_source = context_source_for_snapshot(context_snapshot.as_ref());
-    state.claimed_jsonl_path = resolved_path;
+    state.claimed_jsonl_path = resolved_path.clone();
+    if resolved_path.is_some() {
+        state.claimed_cwd = Some(session.cwd.clone());
+    }
     let next_commit_candidate = commit_candidate_for_context(context_snapshot.as_ref());
 
     if handle_sleeping_session(
@@ -2410,6 +2427,75 @@ mod tests {
                 .and_then(|path| path.file_name())
                 .and_then(|name| name.to_str()),
             Some("rollout-a.jsonl")
+        );
+    }
+
+    #[test]
+    fn cwd_change_invalidates_claimed_jsonl_path() {
+        let now = Utc::now();
+        let mut engine = mock_engine("working on project-a");
+
+        let mut session = sample_session(now);
+        session.session_id = "tmux:9:1.0:%5".to_string();
+        session.cwd = "/tmp/project-a".to_string();
+
+        // First sync — creates state
+        engine.sync(&SyncRequest {
+            id: "req-1".to_string(),
+            now,
+            config: ThoughtConfig::default(),
+            sessions: vec![session.clone()],
+        });
+
+        // Manually inject a claimed path to simulate successful discovery
+        let stale_path = PathBuf::from("/tmp/fake-project-a.jsonl");
+        let state = engine
+            .per_session
+            .get_mut("tmux:9:1.0:%5")
+            .expect("state should exist");
+        state.claimed_jsonl_path = Some(stale_path.clone());
+        state.claimed_cwd = Some("/tmp/project-a".to_string());
+
+        // Second sync — same CWD, claim should persist
+        session.last_activity_at = now + Duration::seconds(10);
+        engine.sync(&SyncRequest {
+            id: "req-2".to_string(),
+            now: now + Duration::seconds(10),
+            config: ThoughtConfig::default(),
+            sessions: vec![session.clone()],
+        });
+        // Claim file doesn't exist so resolved_path is None, but the key thing
+        // is the invalidation logic didn't run (claimed_cwd matched).
+
+        // Re-inject claim for the CWD-change test
+        let state = engine
+            .per_session
+            .get_mut("tmux:9:1.0:%5")
+            .expect("state should exist");
+        state.claimed_jsonl_path = Some(stale_path);
+        state.claimed_cwd = Some("/tmp/project-a".to_string());
+
+        // Third sync — CWD changed, claim must be invalidated
+        session.cwd = "/tmp/project-b".to_string();
+        session.last_activity_at = now + Duration::seconds(20);
+        engine.sync(&SyncRequest {
+            id: "req-3".to_string(),
+            now: now + Duration::seconds(20),
+            config: ThoughtConfig::default(),
+            sessions: vec![session],
+        });
+
+        let state = engine
+            .per_session
+            .get("tmux:9:1.0:%5")
+            .expect("state should exist after CWD change");
+        assert!(
+            state.claimed_jsonl_path.is_none(),
+            "claimed_jsonl_path must be cleared when CWD changes"
+        );
+        assert!(
+            state.claimed_cwd.is_none() || state.claimed_cwd.as_deref() != Some("/tmp/project-a"),
+            "claimed_cwd must not reference the old CWD"
         );
     }
 }

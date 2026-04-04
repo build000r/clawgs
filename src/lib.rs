@@ -478,15 +478,21 @@ fn reader_matches_or_lacks_cwd<R: BufRead>(reader: R, cwd_str: &str) -> bool {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::{Mutex, OnceLock};
+
+    pub(crate) fn home_env_lock() -> &'static Mutex<()> {
+        static HOME_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        HOME_ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use std::thread;
     use std::time::Duration;
     use tempfile::NamedTempFile;
-
-    /// Tests that modify $HOME must hold this lock to avoid racing each other.
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn infer_codex_tool_from_response_item() {
@@ -552,7 +558,7 @@ mod tests {
 
     #[test]
     fn excluding_empty_set_returns_newest() {
-        let _lock = HOME_LOCK.lock().unwrap();
+        let _lock = crate::test_support::home_env_lock().lock().unwrap();
         let (tmp, cwd, paths) = setup_claude_project_dir("/tmp/project", 2);
         std::env::set_var("HOME", tmp.path());
         let result = discover_claude_path_excluding(&cwd, &HashSet::new());
@@ -561,7 +567,7 @@ mod tests {
 
     #[test]
     fn excluding_newest_returns_second() {
-        let _lock = HOME_LOCK.lock().unwrap();
+        let _lock = crate::test_support::home_env_lock().lock().unwrap();
         let (tmp, cwd, paths) = setup_claude_project_dir("/tmp/project-a", 2);
         std::env::set_var("HOME", tmp.path());
         let mut excluded = HashSet::new();
@@ -576,7 +582,7 @@ mod tests {
 
     #[test]
     fn excluding_all_returns_none() {
-        let _lock = HOME_LOCK.lock().unwrap();
+        let _lock = crate::test_support::home_env_lock().lock().unwrap();
         let (tmp, cwd, paths) = setup_claude_project_dir("/tmp/project-b", 1);
         std::env::set_var("HOME", tmp.path());
         let mut excluded = HashSet::new();
@@ -587,7 +593,7 @@ mod tests {
 
     #[test]
     fn exclusion_does_not_cross_cwd_boundaries() {
-        let _lock = HOME_LOCK.lock().unwrap();
+        let _lock = crate::test_support::home_env_lock().lock().unwrap();
         let (tmp, _cwd_a, paths_a) = setup_claude_project_dir("/tmp/project-c", 1);
         // Create a second project dir under the same HOME
         let cwd_b = PathBuf::from("/tmp/project-d");
@@ -618,7 +624,7 @@ mod tests {
 
     #[test]
     fn claude_discovery_filters_colliding_slug_by_exact_cwd() {
-        let _lock = HOME_LOCK.lock().unwrap();
+        let _lock = crate::test_support::home_env_lock().lock().unwrap();
         let tmp = tempfile::tempdir().expect("tempdir");
 
         let cwd_a = PathBuf::from("/tmp/a-b/c");
@@ -672,7 +678,7 @@ mod tests {
 
     #[test]
     fn claude_discovery_exclusion_isolates_same_cwd_sessions() {
-        let _lock = HOME_LOCK.lock().unwrap();
+        let _lock = crate::test_support::home_env_lock().lock().unwrap();
         let (tmp, cwd, paths) = setup_claude_project_dir("/tmp/shared-cwd", 2);
         std::env::set_var("HOME", tmp.path());
 
@@ -690,7 +696,7 @@ mod tests {
 
     #[test]
     fn discover_for_tool_finds_codex_rollout() {
-        let _lock = HOME_LOCK.lock().unwrap();
+        let _lock = crate::test_support::home_env_lock().lock().unwrap();
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = PathBuf::from("/tmp/codex-project");
         let codex_day = tmp
@@ -721,7 +727,7 @@ mod tests {
 
     #[test]
     fn discover_auto_prefers_newer_codex_rollout() {
-        let _lock = HOME_LOCK.lock().unwrap();
+        let _lock = crate::test_support::home_env_lock().lock().unwrap();
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = PathBuf::from("/tmp/mixed-project");
         std::env::set_var("HOME", tmp.path());

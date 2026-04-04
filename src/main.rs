@@ -1,3 +1,5 @@
+mod demo;
+
 use std::io::{self, BufRead, Write};
 use std::os::unix::net::UnixDatagram;
 use std::path::PathBuf;
@@ -14,7 +16,7 @@ use clawgs::emit::model_client::{
 };
 use clawgs::emit::protocol::{ErrorMessage, HelloMessage, SyncRequest, SyncResultMessage};
 use clawgs::tmux::scan_sessions;
-use clawgs::{extract, resolve_input, ExtractOptions, ToolSelection};
+use clawgs::{extract, resolve_input, AgentTool, ExtractOptions, ToolSelection};
 
 #[derive(Debug, Parser)]
 #[command(name = "clawgs")]
@@ -27,6 +29,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    Demo(DemoArgs),
     Extract(ExtractArgs),
     Emit(EmitArgs),
     TmuxEmit(TmuxEmitArgs),
@@ -69,6 +72,47 @@ struct EmitArgs {
 }
 
 #[derive(Debug, Args)]
+struct DemoArgs {
+    #[command(subcommand)]
+    command: DemoCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum DemoCommands {
+    /// Show a built-in transcript corpus and the extracted snapshot it produces.
+    Extract(DemoExtractArgs),
+    /// Show a built-in emit protocol exchange without external credentials.
+    Emit(DemoEmitArgs),
+}
+
+#[derive(Debug, Args)]
+struct DemoExtractArgs {
+    #[arg(long, value_enum, default_value_t = DemoToolArg::Codex)]
+    tool: DemoToolArg,
+
+    #[arg(long)]
+    pretty: bool,
+
+    #[arg(long, default_value_t = 10)]
+    max_actions: usize,
+
+    #[arg(long, default_value_t = 300)]
+    max_task_chars: usize,
+
+    #[arg(long, default_value_t = 100)]
+    max_detail_chars: usize,
+
+    #[arg(long)]
+    include_raw: bool,
+}
+
+#[derive(Debug, Args)]
+struct DemoEmitArgs {
+    #[arg(long)]
+    pretty: bool,
+}
+
+#[derive(Debug, Args)]
 struct TmuxEmitArgs {
     #[arg(long, default_value_t = 15_000)]
     interval_ms: u64,
@@ -105,6 +149,12 @@ enum ToolArg {
     Codex,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum DemoToolArg {
+    Claude,
+    Codex,
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("error: {error:#}");
@@ -115,6 +165,7 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Commands::Demo(args) => run_demo(args),
         Commands::Extract(args) => run_extract(args),
         Commands::Emit(args) => run_emit(args),
         Commands::TmuxEmit(args) => run_tmux_emit(args),
@@ -124,15 +175,7 @@ fn run() -> Result<()> {
 }
 
 fn run_extract(args: ExtractArgs) -> Result<()> {
-    if args.max_actions == 0 {
-        anyhow::bail!("--max-actions must be greater than 0");
-    }
-    if args.max_task_chars == 0 {
-        anyhow::bail!("--max-task-chars must be greater than 0");
-    }
-    if args.max_detail_chars == 0 {
-        anyhow::bail!("--max-detail-chars must be greater than 0");
-    }
+    validate_extract_limits(args.max_actions, args.max_task_chars, args.max_detail_chars)?;
 
     let cwd = match args.cwd {
         Some(path) => path,
@@ -162,13 +205,37 @@ fn run_extract(args: ExtractArgs) -> Result<()> {
         &options,
     )?;
 
-    if args.pretty {
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        println!("{}", serde_json::to_string(&output)?);
-    }
+    print_json(&output, args.pretty)?;
 
     Ok(())
+}
+
+fn run_demo(args: DemoArgs) -> Result<()> {
+    match args.command {
+        DemoCommands::Extract(args) => run_demo_extract(args),
+        DemoCommands::Emit(args) => run_demo_emit(args),
+    }
+}
+
+fn run_demo_extract(args: DemoExtractArgs) -> Result<()> {
+    validate_extract_limits(args.max_actions, args.max_task_chars, args.max_detail_chars)?;
+
+    let output = demo::build_extract_demo(
+        demo_tool(args.tool),
+        ExtractOptions {
+            max_actions: args.max_actions,
+            max_task_chars: args.max_task_chars,
+            max_detail_chars: args.max_detail_chars,
+            include_raw: args.include_raw,
+        },
+    )?;
+
+    print_json(&output, args.pretty)
+}
+
+fn run_demo_emit(args: DemoEmitArgs) -> Result<()> {
+    let output = demo::build_emit_demo();
+    print_json(&output, args.pretty)
 }
 
 fn run_emit(args: EmitArgs) -> Result<()> {
@@ -305,6 +372,40 @@ fn run_defaults() -> Result<()> {
 
     println!("{}", serde_json::to_string(&defaults)?);
     Ok(())
+}
+
+fn validate_extract_limits(
+    max_actions: usize,
+    max_task_chars: usize,
+    max_detail_chars: usize,
+) -> Result<()> {
+    if max_actions == 0 {
+        anyhow::bail!("--max-actions must be greater than 0");
+    }
+    if max_task_chars == 0 {
+        anyhow::bail!("--max-task-chars must be greater than 0");
+    }
+    if max_detail_chars == 0 {
+        anyhow::bail!("--max-detail-chars must be greater than 0");
+    }
+
+    Ok(())
+}
+
+fn print_json<T: Serialize>(value: &T, pretty: bool) -> Result<()> {
+    if pretty {
+        println!("{}", serde_json::to_string_pretty(value)?);
+    } else {
+        println!("{}", serde_json::to_string(value)?);
+    }
+    Ok(())
+}
+
+fn demo_tool(tool: DemoToolArg) -> AgentTool {
+    match tool {
+        DemoToolArg::Claude => AgentTool::Claude,
+        DemoToolArg::Codex => AgentTool::Codex,
+    }
 }
 
 fn run_tmux_emit(args: TmuxEmitArgs) -> Result<()> {

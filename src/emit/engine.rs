@@ -1608,7 +1608,6 @@ fn hash_string(value: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::sync::Mutex;
 
     use chrono::Duration;
     use tempfile::tempdir;
@@ -1616,8 +1615,6 @@ mod tests {
     use super::*;
     use crate::emit::model_client::{ModelBackend, ModelClient};
     use crate::emit::protocol::{SessionSnapshot, SessionState, SyncRequest, ThoughtConfig};
-
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
 
     struct MockModelClient {
         response: String,
@@ -2142,7 +2139,9 @@ mod tests {
 
     #[test]
     fn multiple_historical_transcripts_bind_newest_candidate() {
-        let _lock = HOME_LOCK.lock().expect("home lock");
+        let _lock = crate::test_support::home_env_lock()
+            .lock()
+            .expect("home lock");
         let home = tempdir().expect("tempdir");
         std::env::set_var("HOME", home.path());
 
@@ -2213,7 +2212,9 @@ mod tests {
 
     #[test]
     fn multiple_live_sessions_same_cwd_fall_back_to_terminal_only() {
-        let _lock = HOME_LOCK.lock().expect("home lock");
+        let _lock = crate::test_support::home_env_lock()
+            .lock()
+            .expect("home lock");
         let home = tempdir().expect("tempdir");
         std::env::set_var("HOME", home.path());
 
@@ -2374,7 +2375,9 @@ mod tests {
 
     #[test]
     fn unique_transcript_context_allows_first_thought_without_terminal_delta() {
-        let _lock = HOME_LOCK.lock().expect("home lock");
+        let _lock = crate::test_support::home_env_lock()
+            .lock()
+            .expect("home lock");
         let home = tempdir().expect("tempdir");
         std::env::set_var("HOME", home.path());
 

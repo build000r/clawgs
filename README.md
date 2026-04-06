@@ -2,9 +2,9 @@
 
 <div align="center">
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/build000r/clawgs/blob/main/LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
-[![Protocol](https://img.shields.io/badge/protocol-clawgs.emit.v1-blue.svg)](references/emit-protocol-v1.md)
+[![Protocol](https://img.shields.io/badge/protocol-clawgs.emit.v1-blue.svg)](https://github.com/build000r/clawgs/blob/main/references/emit-protocol-v1.md)
 
 </div>
 
@@ -15,9 +15,8 @@ Turn Claude Code and Codex transcripts into stable JSON snapshots, then replay t
 **Quick Start**
 
 ```bash
-bash scripts/install.sh
-bash scripts/check.sh
-target/release/clawgs demo extract --tool codex --pretty
+cargo install clawgs
+clawgs demo extract --tool codex --pretty
 ```
 
 </div>
@@ -30,7 +29,7 @@ Agent transcripts are useful, but they are verbose, tool-specific, and usually t
 
 ### The Solution
 
-`clawgs` normalizes Claude Code and Codex session logs into a small, stable JSON contract, and it exposes the live thought-emission protocol over NDJSON. The new `demo` command makes the whole thing legible from a clean machine with embedded, sanitized examples in [examples/demo](examples/demo).
+`clawgs` normalizes Claude Code and Codex session logs into a small, stable JSON contract, and it exposes the live thought-emission protocol over NDJSON. The new `demo` command makes the whole thing legible from a clean machine with embedded, sanitized examples in [examples/demo](https://github.com/build000r/clawgs/tree/main/examples/demo).
 
 ### Why Use `clawgs`?
 
@@ -44,32 +43,37 @@ Agent transcripts are useful, but they are verbose, tool-specific, and usually t
 
 ## Quick Example
 
-After cloning the repo:
+Install from crates.io:
 
 ```bash
-# Build the release binary
-bash scripts/install.sh
-
-# Verify the binary and a smoke extraction path
-bash scripts/check.sh
+cargo install clawgs
 
 # See the built-in Codex transcript -> snapshot pair
-target/release/clawgs demo extract --tool codex --pretty
+clawgs demo extract --tool codex --pretty
 
 # See the built-in Claude transcript -> snapshot pair
-target/release/clawgs demo extract --tool claude --pretty
+clawgs demo extract --tool claude --pretty
 
 # See the canonical emit protocol exchange, no backend creds required
-target/release/clawgs demo emit --pretty
+clawgs demo emit --pretty
 
 # Parse a real local transcript by discovery
-target/release/clawgs extract --tool auto --cwd "$PWD"
+clawgs extract --tool auto --cwd "$PWD"
 
 # Run the live stdio daemon
-target/release/clawgs emit --stdio
+clawgs emit --stdio
 ```
 
-Protocol details live in [references/emit-protocol-v1.md](references/emit-protocol-v1.md). The extract schema lives in [references/schema-v1.md](references/schema-v1.md).
+Or build from source:
+
+```bash
+git clone https://github.com/build000r/clawgs && cd clawgs
+bash scripts/install.sh
+bash scripts/check.sh
+target/release/clawgs demo extract --tool codex --pretty
+```
+
+Protocol details live in [references/emit-protocol-v1.md](https://github.com/build000r/clawgs/blob/main/references/emit-protocol-v1.md). The extract schema lives in [references/schema-v1.md](https://github.com/build000r/clawgs/blob/main/references/schema-v1.md).
 
 ## Design Philosophy
 
@@ -87,7 +91,7 @@ The point is not to expose raw transcripts. The point is to collapse them into a
 
 ### 4. Real Examples Over Abstract Claims
 
-The checked-in corpus in [examples/demo](examples/demo) and the reference docs in [references](references) are part of the product surface, not afterthoughts.
+The checked-in corpus in [examples/demo](https://github.com/build000r/clawgs/tree/main/examples/demo) and the reference docs in [references](https://github.com/build000r/clawgs/tree/main/references) are part of the product surface, not afterthoughts.
 
 ## Comparison
 
@@ -108,7 +112,7 @@ The checked-in corpus in [examples/demo](examples/demo) and the reference docs i
 - You need a hosted backend or multi-user service.
 - You want package-manager releases or turnkey installers today; this repo is source-first right now.
 
-For the deeper thesis, see [docs/VISION.md](docs/VISION.md): mission, vision, values, competitive fit, and why this project intentionally stops short of becoming a dashboard, a platform, or a general-purpose agent framework.
+For the deeper thesis, see [docs/VISION.md](https://github.com/build000r/clawgs/blob/main/docs/VISION.md): mission, vision, values, competitive fit, and why this project intentionally stops short of becoming a dashboard, a platform, or a general-purpose agent framework.
 
 ## Installation
 
@@ -164,7 +168,7 @@ target/release/clawgs extract --tool auto --cwd "$PWD"
 source-file "/path/to/clawgs/references/tmux-clawgs.conf"
 ```
 
-That snippet lives in [references/tmux-clawgs.conf](references/tmux-clawgs.conf).
+That snippet lives in [references/tmux-clawgs.conf](https://github.com/build000r/clawgs/blob/main/references/tmux-clawgs.conf).
 
 ## Commands
 
@@ -370,7 +374,7 @@ No. It is a normalizer and protocol layer. It turns verbose session state into s
 
 ### Does `clawgs demo` use my local transcripts?
 
-No. It uses the checked-in sanitized corpus in [examples/demo](examples/demo).
+No. It uses the checked-in sanitized corpus in [examples/demo](https://github.com/build000r/clawgs/tree/main/examples/demo).
 
 ### Does `demo emit` call OpenRouter, Claude, or Codex?
 
@@ -382,11 +386,11 @@ Yes. `extract`, `demo`, `emit --stdio`, and `defaults` do not require tmux.
 
 ### Can I inspect the exact schema and protocol?
 
-Yes. See [references/schema-v1.md](references/schema-v1.md) and [references/emit-protocol-v1.md](references/emit-protocol-v1.md).
+Yes. See [references/schema-v1.md](https://github.com/build000r/clawgs/blob/main/references/schema-v1.md) and [references/emit-protocol-v1.md](https://github.com/build000r/clawgs/blob/main/references/emit-protocol-v1.md).
 
 ### Is the demo corpus the same thing as the tests?
 
-They are related, but the public corpus in [examples/demo](examples/demo) exists for onboarding and documentation, not just for internal regression coverage.
+They are related, but the public corpus in [examples/demo](https://github.com/build000r/clawgs/tree/main/examples/demo) exists for onboarding and documentation, not just for internal regression coverage.
 
 ## About Contributions
 
@@ -394,4 +398,4 @@ They are related, but the public corpus in [examples/demo](examples/demo) exists
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](https://github.com/build000r/clawgs/blob/main/LICENSE).

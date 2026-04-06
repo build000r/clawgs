@@ -4,6 +4,24 @@ version = "0.1.0"
 edition = "2021"
 description = "Extract structured JSON snapshots from Claude Code and Codex JSONL transcripts"
 license = "MIT"
+readme = "README.md"
+repository = "https://github.com/build000r/clawgs"
+homepage = "https://github.com/build000r/clawgs"
+documentation = "https://docs.rs/clawgs"
+keywords = ["claude", "codex", "jsonl", "transcripts", "cli"]
+categories = ["command-line-utilities", "parser-implementations", "development-tools"]
+exclude = [
+    "target/",
+    ".mutate/",
+    "mutants.out/",
+    "lcov.info",
+    "scripts/",
+    "tests/",
+    "docs/",
+    "references/",
+    "Makefile",
+    "SKILL.md",
+]
 
 [dependencies]
 anyhow = "1"

@@ -110,30 +110,33 @@ The checked-in corpus in [examples/demo](https://github.com/build000r/clawgs/tre
 **When `clawgs` is not the right tool:**
 - You need full transcript storage, search, or analytics.
 - You need a hosted backend or multi-user service.
-- You want package-manager releases or turnkey installers today; this repo is source-first right now.
+- You want Homebrew, npm, PyPI, or a curl installer today; only `cargo install` is wired up so far.
 
 For the deeper thesis, see [docs/VISION.md](https://github.com/build000r/clawgs/blob/main/docs/VISION.md): mission, vision, values, competitive fit, and why this project intentionally stops short of becoming a dashboard, a platform, or a general-purpose agent framework.
 
 ## Installation
 
-### From Source (Recommended Right Now)
+### From crates.io
 
 ```bash
+cargo install clawgs
+```
+
+That gets you a `clawgs` binary on your `PATH` with no repo checkout required.
+
+### From Source
+
+```bash
+git clone https://github.com/build000r/clawgs && cd clawgs
 bash scripts/install.sh
 bash scripts/check.sh
 ```
 
-That builds `target/release/clawgs` and verifies the binary with a smoke test.
-
-### Local Cargo Install
-
-```bash
-cargo install --path .
-```
+That builds `target/release/clawgs` and verifies the binary with a smoke test. You can also run `cargo install --path .` from inside a checkout.
 
 ### What Is Not Published Yet
 
-There is no Homebrew formula, no npm package, no PyPI package, and no curl installer in this repo yet. The README only documents install paths the repo already supports today.
+There is no Homebrew formula, no npm package, no PyPI package, and no curl installer yet. crates.io is currently the only published distribution channel.
 
 ## Quick Start
 
@@ -363,7 +366,7 @@ target/release/clawgs tmux-emit --once
 - `clawgs` only understands the Claude and Codex transcript shapes it has been taught so far.
 - The built-in demo corpus is representative, not exhaustive.
 - `tmux-emit` and `tmux-notify` are Unix/tmux-centric; they are not a cross-platform pane abstraction.
-- There is no published release channel or package-manager distribution yet.
+- crates.io is the only published distribution channel so far; Homebrew, npm, PyPI, and a curl installer are not wired up yet.
 - Live thought emission can use external backends if you choose them; the repo does not pretend those calls are offline.
 
 ## FAQ

@@ -35,3 +35,12 @@ serde_json = "1"
 
 [dev-dependencies]
 tempfile = "3"
+
+# Release profile tuned for the long-lived `clawgs emit --stdio` daemon used
+# by swimmers (spawned once, then sync every 2s). Smaller resident footprint
+# and less code-path dispersion matter more than compile time here.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

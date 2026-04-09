@@ -7,8 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use serde::Serialize;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
 
 use clawgs::emit::engine::{EmitEngine, DEFAULT_AGENT_PREAMBLE, DEFAULT_TERMINAL_PREAMBLE};
 use clawgs::emit::model_client::{
@@ -274,40 +273,42 @@ fn handle_emit_line<W: Write>(
     engine: &mut EmitEngine,
     trimmed: &str,
 ) -> Result<()> {
-    let response = parsed_emit_message(trimmed)
-        .and_then(|value| sync_response_for_value(engine, value))
+    let response = sync_response_for_line(engine, trimmed)
         .map(EmitLineResult::Sync)
         .unwrap_or_else(EmitLineResult::Error);
     response.write(stdout)
 }
 
-fn parsed_emit_message(trimmed: &str) -> std::result::Result<Value, ErrorMessage> {
-    serde_json::from_str(trimmed)
-        .map_err(|error| ErrorMessage::new(None, "invalid_json", format!("invalid JSON: {error}")))
+/// Lightweight peek at the envelope before attempting the typed parse.
+/// Captures only `type` and `id`, so we can dispatch + preserve error codes
+/// without materializing a full `serde_json::Value` tree per sync tick.
+#[derive(Deserialize)]
+struct EmitMessageHeader {
+    #[serde(rename = "type")]
+    msg_type: String,
+    #[serde(default)]
+    id: Option<String>,
 }
 
-fn sync_response_for_value(
+fn sync_response_for_line(
     engine: &mut EmitEngine,
-    value: Value,
+    trimmed: &str,
 ) -> std::result::Result<SyncResultMessage, ErrorMessage> {
-    match emit_message_type(&value) {
-        "sync" => sync_response_for_request(engine, value),
-        msg_type => Err(ErrorMessage::new(
-            emit_request_id(&value),
+    let header: EmitMessageHeader = serde_json::from_str(trimmed).map_err(|error| {
+        ErrorMessage::new(None, "invalid_json", format!("invalid JSON: {error}"))
+    })?;
+
+    if header.msg_type != "sync" {
+        return Err(ErrorMessage::new(
+            header.id,
             "unknown_message_type",
-            format!("unsupported message type: {msg_type}"),
-        )),
+            format!("unsupported message type: {}", header.msg_type),
+        ));
     }
-}
 
-fn sync_response_for_request(
-    engine: &mut EmitEngine,
-    value: Value,
-) -> std::result::Result<SyncResultMessage, ErrorMessage> {
-    let request_id = emit_request_id(&value);
-    let request: SyncRequest = serde_json::from_value(value).map_err(|error| {
+    let request: SyncRequest = serde_json::from_str(trimmed).map_err(|error| {
         ErrorMessage::new(
-            request_id,
+            header.id,
             "invalid_request",
             format!("invalid sync request shape: {error}"),
         )
@@ -321,20 +322,6 @@ fn sync_response_for_request(
         )
     })?;
     Ok(engine.sync(&request))
-}
-
-fn emit_request_id(value: &Value) -> Option<String> {
-    value
-        .get("id")
-        .and_then(Value::as_str)
-        .map(|value| value.to_string())
-}
-
-fn emit_message_type(value: &Value) -> &str {
-    value
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
 }
 
 enum EmitLineResult {

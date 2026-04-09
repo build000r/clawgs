@@ -172,10 +172,17 @@ impl EmitEngine {
             );
         }
 
+        // Ambiguity only matters when two sessions share a (tool, cwd) group,
+        // which requires at least two sessions. Swimmers' common case is a
+        // single pane per sync tick, so skip the HashMap + format! entirely
+        // below the threshold. With zero or one session the group count is
+        // trivially non-ambiguous.
         let mut transcript_group_counts: HashMap<String, usize> = HashMap::new();
-        for session in &request.sessions {
-            if let Some(group_key) = transcript_group_key(session) {
-                *transcript_group_counts.entry(group_key).or_insert(0) += 1;
+        if request.sessions.len() > 1 {
+            for session in &request.sessions {
+                if let Some(group_key) = transcript_group_key(session) {
+                    *transcript_group_counts.entry(group_key).or_insert(0) += 1;
+                }
             }
         }
 

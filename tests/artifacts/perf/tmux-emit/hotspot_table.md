@@ -1,5 +1,12 @@
 # Hotspot Table — tmux-emit Steady-State (Scenario A)
 
+> **⚠ Historic / superseded attribution.** Ranks 1–2 in this table (`chrono::format::*`)
+> turned out to be LTO-thin symbol misattribution of syscall trampolines in
+> `libsystem_kernel.dylib`. See `hypothesis_ledger.md` § *Attribution pass (debug=2)*
+> for the corrected ranking and `AFTER.md` for the before/after pack shipped in
+> commit `42a45eb` (`perf(tmux): batch capture-pane into one tmux invocation`).
+> Kept as-is as the committed record of what release-perf profiling originally reported.
+
 Ranked by CPU self-time from a 25.3s samply profile (6272 samples, 1ms interval).
 Total CPU consumed: ~1507ms across 25.3s wall time (6.0% utilization; remainder is socket-wait idle).
 

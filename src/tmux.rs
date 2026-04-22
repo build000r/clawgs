@@ -62,10 +62,21 @@ impl TmuxScanTracker {
         tmux_bin: &str,
     ) -> Result<Vec<SessionSnapshot>> {
         let stdout = list_tmux_panes(tmux_bin)?;
-        let observations: Vec<_> = stdout
+        let metas: Vec<PaneMeta> = stdout
             .lines()
             .filter_map(parse_pane_meta_line)
-            .filter_map(|meta| pane_meta_to_observation(max_capture_lines, tmux_bin, meta))
+            .filter(|meta| !meta.dead)
+            .collect();
+
+        let pane_ids: Vec<&str> = metas.iter().map(|m| m.pane_id.as_str()).collect();
+        let captures = capture_panes(tmux_bin, &pane_ids, max_capture_lines);
+
+        let observations: Vec<_> = metas
+            .into_iter()
+            .map(|meta| {
+                let replay_text = captures.get(&meta.pane_id).cloned().unwrap_or_default();
+                build_session_observation(meta, replay_text)
+            })
             .collect();
 
         let live_ids: HashSet<_> = observations
@@ -236,22 +247,7 @@ impl TrackedSession {
     }
 }
 
-fn pane_meta_to_observation(
-    max_capture_lines: usize,
-    tmux_bin: &str,
-    meta: PaneMeta,
-) -> Option<SessionObservation> {
-    (!meta.dead).then(|| build_session_observation(max_capture_lines, tmux_bin, meta))
-}
-
-fn build_session_observation(
-    max_capture_lines: usize,
-    tmux_bin: &str,
-    meta: PaneMeta,
-) -> SessionObservation {
-    let replay_text =
-        capture_pane_text(tmux_bin, &meta.pane_id, max_capture_lines).unwrap_or_default();
-
+fn build_session_observation(meta: PaneMeta, replay_text: String) -> SessionObservation {
     SessionObservation {
         session_id: format!(
             "tmux:{}:{}.{}:{}",
@@ -264,10 +260,111 @@ fn build_session_observation(
     }
 }
 
-fn capture_pane_text(tmux_bin: &str, pane_id: &str, max_capture_lines: usize) -> Result<String> {
+// ASCII Record Separator; tmux-reserved formats never emit this byte.
+const BATCH_MARKER_BYTE: char = '\u{1e}';
+const BATCH_MARKER_TAG: &str = "\u{1e}CLAWGS:";
+const BATCH_END_SENTINEL: &str = "END";
+
+/// Capture pane text for every pane in one tmux invocation when possible,
+/// falling back to per-pane captures if the composite run fails or returns
+/// a shape we don't recognize (e.g. the test fake-tmux or an unsupported
+/// tmux version).
+fn capture_panes(
+    tmux_bin: &str,
+    pane_ids: &[&str],
+    max_capture_lines: usize,
+) -> HashMap<String, String> {
+    if pane_ids.is_empty() {
+        return HashMap::new();
+    }
+
+    if let Some(batched) = try_batched_capture(tmux_bin, pane_ids, max_capture_lines) {
+        return batched;
+    }
+
+    legacy_per_pane_capture(tmux_bin, pane_ids, max_capture_lines)
+}
+
+fn try_batched_capture(
+    tmux_bin: &str,
+    pane_ids: &[&str],
+    max_capture_lines: usize,
+) -> Option<HashMap<String, String>> {
     let start = capture_start(max_capture_lines);
+    let mut args: Vec<String> = Vec::with_capacity(pane_ids.len() * 8);
+    for (i, pane_id) in pane_ids.iter().enumerate() {
+        if i > 0 {
+            args.push(";".to_string());
+        }
+        args.push("display-message".to_string());
+        args.push("-p".to_string());
+        args.push(format!("{BATCH_MARKER_TAG}{pane_id}{BATCH_MARKER_BYTE}"));
+        args.push(";".to_string());
+        args.push("capture-pane".to_string());
+        args.push("-p".to_string());
+        args.push("-t".to_string());
+        args.push((*pane_id).to_string());
+        args.push("-S".to_string());
+        args.push(start.clone());
+    }
+    args.push(";".to_string());
+    args.push("display-message".to_string());
+    args.push("-p".to_string());
+    args.push(format!(
+        "{BATCH_MARKER_TAG}{BATCH_END_SENTINEL}{BATCH_MARKER_BYTE}"
+    ));
+
+    let output = Command::new(tmux_bin).args(&args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = std::str::from_utf8(&output.stdout).ok()?;
+    if !stdout.contains(BATCH_MARKER_TAG) {
+        return None;
+    }
+
+    Some(parse_batched_capture(stdout, pane_ids))
+}
+
+fn parse_batched_capture(stdout: &str, pane_ids: &[&str]) -> HashMap<String, String> {
+    let mut result: HashMap<String, String> = HashMap::with_capacity(pane_ids.len());
+    let mut rest = stdout;
+    while let Some(idx) = rest.find(BATCH_MARKER_TAG) {
+        rest = &rest[idx + BATCH_MARKER_TAG.len()..];
+        let Some(end_idx) = rest.find(BATCH_MARKER_BYTE) else {
+            break;
+        };
+        let id = &rest[..end_idx];
+        rest = &rest[end_idx + BATCH_MARKER_BYTE.len_utf8()..];
+        if id == BATCH_END_SENTINEL {
+            break;
+        }
+        let next_idx = rest.find(BATCH_MARKER_TAG).unwrap_or(rest.len());
+        let content = rest[..next_idx].trim();
+        result.insert(id.to_string(), content.to_string());
+    }
+    result
+}
+
+fn legacy_per_pane_capture(
+    tmux_bin: &str,
+    pane_ids: &[&str],
+    max_capture_lines: usize,
+) -> HashMap<String, String> {
+    let start = capture_start(max_capture_lines);
+    pane_ids
+        .iter()
+        .map(|pane_id| {
+            let text = capture_pane_once(tmux_bin, pane_id, &start).unwrap_or_default();
+            ((*pane_id).to_string(), text)
+        })
+        .collect()
+}
+
+fn capture_pane_once(tmux_bin: &str, pane_id: &str, start: &str) -> Result<String> {
     let output = Command::new(tmux_bin)
-        .args(["capture-pane", "-p", "-t", pane_id, "-S", &start])
+        .args(["capture-pane", "-p", "-t", pane_id, "-S", start])
         .output()
         .with_context(|| format!("failed to run {tmux_bin} capture-pane for {pane_id}"))?;
 

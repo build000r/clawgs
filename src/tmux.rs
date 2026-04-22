@@ -453,6 +453,78 @@ mod tests {
         assert_eq!(capture_start(200), "-199");
     }
 
+    fn batched_stdout(panes: &[(&str, &str)], include_end: bool) -> String {
+        let mut out = String::new();
+        for (id, body) in panes {
+            out.push_str(&format!("{BATCH_MARKER_TAG}{id}{BATCH_MARKER_BYTE}\n"));
+            out.push_str(body);
+            if !body.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+        if include_end {
+            out.push_str(&format!(
+                "{BATCH_MARKER_TAG}{BATCH_END_SENTINEL}{BATCH_MARKER_BYTE}\n"
+            ));
+        }
+        out
+    }
+
+    #[test]
+    fn parse_batched_capture_extracts_each_pane_content() {
+        let stdout = batched_stdout(
+            &[
+                ("%1", "first pane line 1\nfirst pane line 2"),
+                ("%2", "second pane"),
+            ],
+            true,
+        );
+        let parsed = parse_batched_capture(&stdout, &["%1", "%2"]);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed["%1"], "first pane line 1\nfirst pane line 2");
+        assert_eq!(parsed["%2"], "second pane");
+    }
+
+    #[test]
+    fn parse_batched_capture_returns_empty_when_no_markers_present() {
+        let parsed = parse_batched_capture("raw shell output\nwith no markers\n", &["%1"]);
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn parse_batched_capture_stops_at_end_sentinel_and_ignores_trailing_data() {
+        let mut stdout = batched_stdout(&[("%1", "body")], true);
+        stdout.push_str(&format!("{BATCH_MARKER_TAG}%2{BATCH_MARKER_BYTE}\nleaked\n"));
+        let parsed = parse_batched_capture(&stdout, &["%1", "%2"]);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed["%1"], "body");
+        assert!(!parsed.contains_key("%2"));
+    }
+
+    #[test]
+    fn parse_batched_capture_tolerates_missing_end_sentinel() {
+        let stdout = batched_stdout(&[("%1", "alpha"), ("%2", "bravo")], false);
+        let parsed = parse_batched_capture(&stdout, &["%1", "%2"]);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed["%1"], "alpha");
+        assert_eq!(parsed["%2"], "bravo");
+    }
+
+    #[test]
+    fn parse_batched_capture_bails_on_unterminated_marker() {
+        let stdout = format!("{BATCH_MARKER_TAG}%1-no-close-byte\nleftover\n");
+        let parsed = parse_batched_capture(&stdout, &["%1"]);
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn parse_batched_capture_records_empty_content_for_silent_pane() {
+        let stdout = batched_stdout(&[("%1", "")], true);
+        let parsed = parse_batched_capture(&stdout, &["%1"]);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed["%1"], "");
+    }
+
     #[test]
     fn tmux_server_missing_recognizes_expected_errors() {
         assert!(tmux_server_missing("No server running on /tmp/tmux"));

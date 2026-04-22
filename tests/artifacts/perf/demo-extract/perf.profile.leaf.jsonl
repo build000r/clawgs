@@ -1,0 +1,15 @@
+{"rank":1,"library":"libsystem_kernel.dylib","symbol":"__fcntl","samples":117,"pct":10.3,"category":"temp_file_io"}
+{"rank":2,"library":"libsystem_kernel.dylib","symbol":"__recvfrom_nocancel","samples":108,"pct":9.5,"category":"network_resolution"}
+{"rank":3,"library":"libsystem_malloc.dylib","symbol":"malloc/free","samples":81,"pct":7.2,"category":"allocation"}
+{"rank":4,"library":"libsystem_kernel.dylib","symbol":"__unlink","samples":58,"pct":5.1,"category":"temp_file_io"}
+{"rank":5,"library":"libsystem_kernel.dylib","symbol":"__mmap","samples":56,"pct":4.9,"category":"memory_mapping"}
+{"rank":6,"library":"libobjc.A.dylib","symbol":"objc_msgSend","samples":40,"pct":3.5,"category":"runtime_dispatch"}
+{"rank":7,"library":"libsystem_kernel.dylib","symbol":"mach_wait_until","samples":27,"pct":2.4,"category":"thread_scheduling"}
+{"rank":8,"library":"libswiftCore.dylib","symbol":"swift_runtime","samples":25,"pct":2.2,"category":"runtime_init"}
+{"rank":9,"library":"libsystem_kernel.dylib","symbol":"__lseek","samples":18,"pct":1.6,"category":"temp_file_io"}
+{"rank":10,"library":"clawgs","symbol":"serde_json::de::MapAccess::next_key_seed","samples":11,"pct":1.0,"category":"json_deserialize"}
+{"rank":11,"library":"clawgs","symbol":"clawgs::Action::serialize","samples":9,"pct":0.8,"category":"json_serialize"}
+{"rank":12,"library":"clawgs","symbol":"core::str::trim_matches","samples":8,"pct":0.7,"category":"string_processing"}
+{"rank":13,"library":"clawgs","symbol":"clawgs::ExtractOutput::serialize","samples":7,"pct":0.6,"category":"json_serialize"}
+{"rank":14,"library":"clawgs","symbol":"clawgs::extract","samples":7,"pct":0.6,"category":"extract_logic"}
+{"rank":15,"library":"clawgs","symbol":"std::io::default_read_to_end","samples":7,"pct":0.6,"category":"file_read"}

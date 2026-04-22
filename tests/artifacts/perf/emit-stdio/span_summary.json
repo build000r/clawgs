@@ -1,0 +1,65 @@
+[
+  {
+    "span": "anstream::adapter::strip::Utf8Parser::add",
+    "cumulative_us": 0,
+    "count": 411,
+    "p50_us": 0,
+    "p95_us": 0,
+    "category": "startup/anstream",
+    "evidence": "26.3% self-time (411/1565 samples). ANSI stream UTF-8 parsing during clap terminal auto-detection at process start. Not per-request."
+  },
+  {
+    "span": "addr2line::line::path_push + Lines::find_location",
+    "cumulative_us": 0,
+    "count": 590,
+    "p50_us": 0,
+    "p95_us": 0,
+    "category": "startup/addr2line",
+    "evidence": "37.7% combined self-time (590/1565 samples). Debug symbol / backtrace infrastructure initialization. Not per-request."
+  },
+  {
+    "span": "chrono::format::scan::timezone_offset_2822",
+    "cumulative_us": 0,
+    "count": 205,
+    "p50_us": 0,
+    "p95_us": 0,
+    "category": "per-request/chrono",
+    "evidence": "13.1% self-time (205/1565 samples). RFC2822 timezone offset parsing during DateTime deserialization of sync request 'now' and 'last_activity_at' fields."
+  },
+  {
+    "span": "reqwest::async_impl::client::ClientBuilder::build",
+    "cumulative_us": 0,
+    "count": 532,
+    "p50_us": 0,
+    "p95_us": 0,
+    "category": "startup/reqwest",
+    "evidence": "34.0% inclusive time (532/1565 samples). HTTP client + tokio runtime construction during model client init. One-time cost per process."
+  },
+  {
+    "span": "clawgs::emit::engine::strip_ansi",
+    "cumulative_us": 0,
+    "count": 7,
+    "p50_us": 0,
+    "p95_us": 0,
+    "category": "per-request/engine",
+    "evidence": "0.4% self-time (7/1565 samples). ANSI escape stripping on replay_text in the sync engine. Per-session per-tick."
+  },
+  {
+    "span": "serde_json (ser+deser combined)",
+    "cumulative_us": 0,
+    "count": 15,
+    "p50_us": 0,
+    "p95_us": 0,
+    "category": "per-request/serde",
+    "evidence": "1.0% self-time, 5.4% inclusive (15 self / 85 inclusive of 1565 samples). JSON parse + serialize for sync request/response."
+  },
+  {
+    "span": "clap_builder::parser (parse+validate)",
+    "cumulative_us": 0,
+    "count": 76,
+    "p50_us": 0,
+    "p95_us": 0,
+    "category": "startup/clap",
+    "evidence": "4.9% self-time (76/1565 samples). CLI argument parsing and validation. One-time cost per process."
+  }
+]

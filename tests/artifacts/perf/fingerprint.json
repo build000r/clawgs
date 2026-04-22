@@ -1,0 +1,28 @@
+{
+  "timestamp": "2026-04-22T00:47:17Z",
+  "hostname": "bs-MacBook-Air.local",
+  "profile": "release-perf",
+  "cpu": {
+    "model": "Apple M4",
+    "core_count": "10"
+  },
+  "ram": {
+    "total": "25769803776"
+  },
+  "os": {
+    "name": "macOS",
+    "version": "15.6",
+    "build": "24G84"
+  },
+  "kernel": {
+    "name": "Darwin",
+    "release": "24.6.0",
+    "machine": "arm64"
+  },
+  "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11) (Homebrew)",
+  "cargo": "cargo 1.93.1 (Homebrew)",
+  "git": {
+    "head": "cab500a887bb254141029a7379b74c33868601e8",
+    "status_short": " M Cargo.toml\n M src/emit/engine.rs\n M src/emit/model_client.rs\n M src/emit/protocol.rs\n M src/lib.rs\n M src/main.rs\n M src/parsers/claude.rs\n M src/parsers/codex.rs\n M src/parsers/mod.rs\n M src/tmux.rs\n M tests/cli_demo.rs\n M tests/tmux_emit.rs\n?? .claude/\n?? .ntm/\n?? scripts/perf/\n?? tests/artifacts/"
+  }
+}

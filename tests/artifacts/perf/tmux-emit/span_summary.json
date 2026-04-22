@@ -1,0 +1,65 @@
+[
+  {
+    "span": "chrono::format::scan::short_or_long_month0",
+    "cumulative_us": 589696,
+    "count": 2632,
+    "p50_us": 224,
+    "p95_us": 224,
+    "category": "datetime_parsing",
+    "evidence": "cpu.json thread[3] leaf-frame 0x7e44; 39.1% of CPU self-time (threadCPUDelta)"
+  },
+  {
+    "span": "chrono::format::parse::parse_internal",
+    "cumulative_us": 417969,
+    "count": 2548,
+    "p50_us": 164,
+    "p95_us": 164,
+    "category": "datetime_parsing",
+    "evidence": "cpu.json thread[3] leaf-frame 0x9498; 27.7% of CPU self-time (threadCPUDelta)"
+  },
+  {
+    "span": "alloc::str::to_lowercase",
+    "cumulative_us": 103474,
+    "count": 445,
+    "p50_us": 233,
+    "p95_us": 233,
+    "category": "string_normalization",
+    "evidence": "cpu.json thread[3] leaf-frame 0x17dc+0x17b0; 6.9% of CPU self-time"
+  },
+  {
+    "span": "FromUtf8Error::Display::fmt",
+    "cumulative_us": 64322,
+    "count": 132,
+    "p50_us": 487,
+    "p95_us": 487,
+    "category": "error_formatting",
+    "evidence": "cpu.json thread[3] leaf-frame 0x1678; 4.3% of CPU self-time"
+  },
+  {
+    "span": "serde_json::read::SliceRead::skip_to_escape",
+    "cumulative_us": 8977,
+    "count": 26,
+    "p50_us": 345,
+    "p95_us": 345,
+    "category": "json_parsing",
+    "evidence": "cpu.json thread[3] leaf-frames 0x167590+0x1675ac+0x167574; 0.6% of CPU self-time"
+  },
+  {
+    "span": "clawgs::emit::engine::strip_ansi",
+    "cumulative_us": 10263,
+    "count": 22,
+    "p50_us": 467,
+    "p95_us": 467,
+    "category": "text_processing",
+    "evidence": "cpu.json thread[3] leaf-frames 0x51c80+0x518c0; 0.7% of CPU self-time"
+  },
+  {
+    "span": "core::str::lossy::Utf8Chunks::next (subprocess I/O)",
+    "cumulative_us": 14392,
+    "count": 27,
+    "p50_us": 533,
+    "p95_us": 533,
+    "category": "io_processing",
+    "evidence": "cpu.json thread[3] leaf-frames 0x941f0+0x941fc; 1.0% of CPU self-time"
+  }
+]

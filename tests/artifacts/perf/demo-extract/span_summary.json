@@ -1,0 +1,49 @@
+{
+  "scenario": "demo-extract",
+  "binary": "target/release-perf/clawgs",
+  "profile_source": "samply 1ms interval, 200 iterations x 2 tools = 400 invocations",
+  "total_clawgs_samples": 1133,
+  "sample_interval_ms": 1.0,
+  "attribution_by_library": {
+    "libsystem_kernel.dylib": {"leaf_samples": 443, "pct": 39.1},
+    "clawgs": {"leaf_samples": 261, "pct": 23.0},
+    "dyld": {"leaf_samples": 161, "pct": 14.2},
+    "libsystem_malloc.dylib": {"leaf_samples": 81, "pct": 7.2},
+    "libobjc.A.dylib": {"leaf_samples": 40, "pct": 3.5},
+    "libswiftCore.dylib": {"leaf_samples": 25, "pct": 2.2},
+    "other": {"leaf_samples": 122, "pct": 10.8}
+  },
+  "top_clawgs_functions_self": [
+    {"address": "0x61eac", "symbol": "serde_json::de::MapAccess::next_key_seed::has_next_key", "file": "de.rs:1990", "self_samples": 11},
+    {"address": "0x7a8f8", "symbol": "clawgs::Action::serialize", "file": "lib.rs:61", "self_samples": 9},
+    {"address": "0x42e2c", "symbol": "core::str::trim_matches", "file": null, "self_samples": 8},
+    {"address": "0x8e148", "symbol": "main", "file": null, "self_samples": 7},
+    {"address": "0x7c95c", "symbol": "clawgs::ExtractOutput::serialize", "file": "lib.rs:111", "self_samples": 7},
+    {"address": "0x58334", "symbol": "clawgs::extract", "file": "lib.rs:157", "self_samples": 7},
+    {"address": "0x16fe48", "symbol": "std::io::default_read_to_end", "file": null, "self_samples": 7},
+    {"address": "0x66b3c", "symbol": "serde_json::ser::format_escaped_str_contents", "file": "ser.rs:2107", "self_samples": 6},
+    {"address": "0x1cae2c", "symbol": "clawgs::main", "file": "main.rs:157", "self_samples": 6},
+    {"address": "0x18c000", "symbol": "std::sys::pal::unix::os::temp_dir", "file": null, "self_samples": 6},
+    {"address": "0x18b7f4", "symbol": "std::sys::fs::unix::File::open_c", "file": null, "self_samples": 6}
+  ],
+  "top_clawgs_functions_inclusive": [
+    {"address": "0x1cae3b", "symbol": "clawgs::main", "file": "main.rs:158", "inclusive_samples": 630},
+    {"address": "0x1c7763", "symbol": "clawgs::run", "file": "main.rs:167", "inclusive_samples": 197},
+    {"address": "0x1c7dcb", "symbol": "clawgs::run (file_io branch)", "file": "main.rs:167", "inclusive_samples": 143},
+    {"address": "0x18b7bb", "symbol": "std::sys::fs::unix::File::open_c", "file": null, "inclusive_samples": 118},
+    {"address": "0x170813", "symbol": "std::sys::fs::remove_file", "file": null, "inclusive_samples": 108},
+    {"address": "0x18b36b", "symbol": "std::fs::write::inner", "file": null, "inclusive_samples": 90},
+    {"address": "0x5838b", "symbol": "clawgs::extract", "file": "lib.rs:166", "inclusive_samples": 63},
+    {"address": "0x5ed0f", "symbol": "clawgs::parsers::read_jsonl", "file": "mod.rs:34", "inclusive_samples": 61},
+    {"address": "0x17340f", "symbol": "std::sys::pal::unix::init (runtime startup)", "file": null, "inclusive_samples": 34},
+    {"address": "0x2ea57", "symbol": "clap_builder::Command::_do_parse", "file": "command.rs:4360", "inclusive_samples": 23}
+  ],
+  "kernel_syscall_breakdown": [
+    {"symbol": "__fcntl (file control)", "samples": 117, "likely_caller": "temp file open/write"},
+    {"symbol": "__recvfrom_nocancel", "samples": 108, "likely_caller": "network/mDNS resolution for temp_dir path"},
+    {"symbol": "__unlink (file delete)", "samples": 58, "likely_caller": "fs::remove_file of temp file"},
+    {"symbol": "__mmap (memory mapping)", "samples": 56, "likely_caller": "dyld/malloc page allocation"},
+    {"symbol": "mach_wait_until", "samples": 27, "likely_caller": "thread scheduling"},
+    {"symbol": "__lseek (file seek)", "samples": 18, "likely_caller": "file read positioning"}
+  ]
+}

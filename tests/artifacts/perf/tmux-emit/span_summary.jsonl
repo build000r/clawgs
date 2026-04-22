@@ -1,0 +1,7 @@
+{"type":"perf.profile.span_summary","span":"chrono::format::scan::short_or_long_month0","cumulative_us":589696,"pct_cpu":39.1,"category":"datetime_parsing","source":"cpu.json"}
+{"type":"perf.profile.span_summary","span":"chrono::format::parse::parse_internal","cumulative_us":417969,"pct_cpu":27.7,"category":"datetime_parsing","source":"cpu.json"}
+{"type":"perf.profile.span_summary","span":"alloc::str::to_lowercase","cumulative_us":103474,"pct_cpu":6.9,"category":"string_normalization","source":"cpu.json"}
+{"type":"perf.profile.span_summary","span":"FromUtf8Error::Display::fmt","cumulative_us":64322,"pct_cpu":4.3,"category":"error_formatting","source":"cpu.json"}
+{"type":"perf.profile.span_summary","span":"core::str::lossy::Utf8Chunks::next","cumulative_us":14392,"pct_cpu":1.0,"category":"io_processing","source":"cpu.json"}
+{"type":"perf.profile.span_summary","span":"clawgs::emit::engine::strip_ansi","cumulative_us":10263,"pct_cpu":0.7,"category":"text_processing","source":"cpu.json"}
+{"type":"perf.profile.span_summary","span":"serde_json::read::SliceRead::skip_to_escape","cumulative_us":8977,"pct_cpu":0.6,"category":"json_parsing","source":"cpu.json"}

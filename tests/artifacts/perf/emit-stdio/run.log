@@ -1,0 +1,8 @@
+[2026-04-22T00:53:18Z] baseline run
+git: cab500a887bb254141029a7379b74c33868601e8
+profile: release-perf
+fingerprint: /Users/b/repos/opensource/clawgs/tests/artifacts/perf/fingerprint.json
+outputs: /Users/b/repos/opensource/clawgs/tests/artifacts/perf/emit-stdio/baseline.json, /Users/b/repos/opensource/clawgs/tests/artifacts/perf/emit-stdio/baseline.md
+commands:
+  - bash scripts/perf/emit_stdio_scenario.sh
+

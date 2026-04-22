@@ -1,0 +1,21 @@
+{
+  "schema": "clawgs.perf.extract_fixture.v1",
+  "strategy": "Replay examples/demo JSONL with hash-derived timestamp and id substitution",
+  "turns_per_tool": 2000,
+  "fixtures": [
+    {
+      "tool": "claude",
+      "path": "/Users/b/repos/opensource/clawgs/tests/artifacts/perf/extract/fixtures/claude-large.jsonl",
+      "records": 4000,
+      "bytes": 1207858
+    },
+    {
+      "tool": "codex",
+      "path": "/Users/b/repos/opensource/clawgs/tests/artifacts/perf/extract/fixtures/codex-large.jsonl",
+      "records": 8000,
+      "bytes": 1541340
+    }
+  ],
+  "total_records": 12000,
+  "total_bytes": 2749198
+}

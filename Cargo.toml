@@ -52,3 +52,11 @@ lto = "thin"
 codegen-units = 1
 debug = "line-tables-only"
 strip = false
+
+# Attribution-resolving variant: full debuginfo + no LTO so samply can attribute
+# chrono parse symbols to their true callsites. Never used for shipping.
+[profile.release-perf-attr]
+inherits = "release-perf"
+lto = "off"
+codegen-units = 16
+debug = 2

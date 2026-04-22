@@ -21,8 +21,8 @@ cmd="${1:-}"
 shift || true
 
 if [[ "$cmd" == "list-panes" ]]; then
-  printf 'work\x1f1\x1f0\x1f%%1\x1f/tmp/project-a\x1fclaude\x1f1\x1f0\n'
-  printf 'ops\x1f2\x1f1\x1f%%2\x1f/tmp/project-b\x1fzsh\x1f0\x1f0\n'
+  printf 'work\x1f1\x1f0\x1f%%1\x1f/tmp/project-a\x1fclaude\x1f0\n'
+  printf 'ops\x1f2\x1f1\x1f%%2\x1f/tmp/project-b\x1fzsh\x1f0\n'
   exit 0
 fi
 

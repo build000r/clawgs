@@ -14,7 +14,7 @@ use clawgs::emit::model_client::{
     build_model_client, default_model_for_backend, resolve_model_backend,
 };
 use clawgs::emit::protocol::{ErrorMessage, HelloMessage, SyncRequest, SyncResultMessage};
-use clawgs::tmux::scan_sessions;
+use clawgs::tmux::TmuxScanTracker;
 use clawgs::{extract, resolve_input, AgentTool, ExtractOptions, ToolSelection};
 
 #[derive(Debug, Parser)]
@@ -399,6 +399,7 @@ fn run_tmux_emit(args: TmuxEmitArgs) -> Result<()> {
     let model_client = build_model_client()
         .map_err(|error| anyhow::anyhow!("failed to initialize model client: {error}"))?;
     let mut engine = EmitEngine::new(model_client);
+    let mut tracker = TmuxScanTracker::new();
     let mut stdout = io::stdout().lock();
     let mut seq = 0u64;
     let tmux_config = tmux_emit_config(&args)?;
@@ -414,6 +415,7 @@ fn run_tmux_emit(args: TmuxEmitArgs) -> Result<()> {
     emit_tmux_scan(
         &mut stdout,
         &mut engine,
+        &mut tracker,
         &mut seq,
         args.max_capture_lines,
         &tmux_config,
@@ -429,6 +431,7 @@ fn run_tmux_emit(args: TmuxEmitArgs) -> Result<()> {
     run_tmux_emit_loop(
         &mut stdout,
         &mut engine,
+        &mut tracker,
         &mut seq,
         args.max_capture_lines,
         args.interval_ms,
@@ -440,6 +443,7 @@ fn run_tmux_emit(args: TmuxEmitArgs) -> Result<()> {
 fn run_tmux_emit_loop<W: Write>(
     stdout: &mut W,
     engine: &mut EmitEngine,
+    tracker: &mut TmuxScanTracker,
     seq: &mut u64,
     max_capture_lines: usize,
     interval_ms: u64,
@@ -454,7 +458,7 @@ fn run_tmux_emit_loop<W: Write>(
             continue;
         }
 
-        emit_tmux_scan(stdout, engine, seq, max_capture_lines, tmux_config)?;
+        emit_tmux_scan(stdout, engine, tracker, seq, max_capture_lines, tmux_config)?;
         next_reconcile_at = Instant::now() + Duration::from_millis(interval_ms);
     }
 }
@@ -496,13 +500,14 @@ fn run_tmux_notify(args: TmuxNotifyArgs) -> Result<()> {
 fn emit_tmux_scan<W: Write>(
     stdout: &mut W,
     engine: &mut EmitEngine,
+    tracker: &mut TmuxScanTracker,
     seq: &mut u64,
     max_capture_lines: usize,
     config: &clawgs::emit::protocol::ThoughtConfig,
 ) -> Result<()> {
     *seq += 1;
     let now = chrono::Utc::now();
-    let sessions = scan_sessions(now, max_capture_lines)?;
+    let sessions = tracker.scan(now, max_capture_lines)?;
 
     let result = engine.sync(&SyncRequest {
         id: format!("tmux-{}", *seq),
@@ -656,12 +661,14 @@ mod tests {
 
         let mut stdout = Vec::new();
         let mut engine = EmitEngine::new(Box::new(DummyModelClient));
+        let mut tracker = TmuxScanTracker::new();
         let mut seq = 0u64;
         let config = clawgs::emit::protocol::ThoughtConfig::default();
 
         let error = run_tmux_emit_loop(
             &mut stdout,
             &mut engine,
+            &mut tracker,
             &mut seq,
             50,
             1_000,

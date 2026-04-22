@@ -833,7 +833,11 @@ mod tests {
                 backend: backend.to_string(),
                 ..ThoughtConfig::default()
             };
-            assert!(cfg.validate().is_ok(), "backend {:?} should be valid", backend);
+            assert!(
+                cfg.validate().is_ok(),
+                "backend {:?} should be valid",
+                backend
+            );
         }
     }
 

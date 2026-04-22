@@ -22,6 +22,8 @@ pub(crate) fn parse(path: &Path, options: &ExtractOptions) -> Result<ParseSnapsh
     let mut recent_actions: Vec<Action> = Vec::new();
     let mut current_tool: Option<Action> = None;
     let mut token_count = 0u64;
+    let mut awaiting_user_input = false;
+    let mut awaiting_user_text: Option<String> = None;
     let mut pending_validation_commands: HashMap<String, String> = HashMap::new();
     let mut pending_validation_sessions: HashMap<String, String> = HashMap::new();
     let mut commit_signal = CommitSignal::default();
@@ -30,6 +32,7 @@ pub(crate) fn parse(path: &Path, options: &ExtractOptions) -> Result<ParseSnapsh
         let ts = extract_timestamp(entry);
         update_user_task(entry, options, &mut user_task);
         update_token_count(entry, &mut token_count);
+        update_awaiting_user_state(entry, &mut awaiting_user_input, &mut awaiting_user_text);
 
         if let Some(observation) = function_call_observation(entry, options, &ts) {
             observe_tool_call(
@@ -95,6 +98,8 @@ pub(crate) fn parse(path: &Path, options: &ExtractOptions) -> Result<ParseSnapsh
         recent_actions,
         current_tool,
         token_count,
+        awaiting_user_input,
+        awaiting_user_text,
         commit_signal: Some(commit_signal),
         events_seen: parsed.entries.len() as u64,
         malformed_lines_skipped: parsed.malformed_lines_skipped,
@@ -151,6 +156,83 @@ fn user_event_message_text(payload: &Value) -> Option<String> {
 
 fn internal_warning_text(text: &str) -> bool {
     text.trim_start().starts_with("Warning:")
+}
+
+fn update_awaiting_user_state(
+    entry: &Value,
+    awaiting_user_input: &mut bool,
+    awaiting_user_text: &mut Option<String>,
+) {
+    if user_task_text(entry).is_some() || event_payload(entry, "turn_aborted").is_some() {
+        *awaiting_user_input = false;
+        *awaiting_user_text = None;
+        return;
+    }
+
+    if let Some((awaiting, text)) = assistant_turn_state(entry) {
+        *awaiting_user_input = awaiting;
+        *awaiting_user_text = text;
+        return;
+    }
+
+    if response_item_payload(entry, "function_call").is_some()
+        || response_item_payload(entry, "custom_tool_call").is_some()
+        || response_item_payload(entry, "function_call_output").is_some()
+        || response_item_payload(entry, "reasoning").is_some()
+        || event_payload(entry, "agent_reasoning").is_some()
+    {
+        *awaiting_user_input = false;
+        *awaiting_user_text = None;
+    }
+}
+
+fn assistant_turn_state(entry: &Value) -> Option<(bool, Option<String>)> {
+    match entry_type(entry) {
+        "response_item" => response_item_message_state(payload(entry)),
+        "event_msg" => event_message_state(payload(entry)),
+        _ => None,
+    }
+}
+
+fn response_item_message_state(payload: &Value) -> Option<(bool, Option<String>)> {
+    (payload.get("type").and_then(Value::as_str) == Some("message")
+        && payload.get("role").and_then(Value::as_str) == Some("assistant"))
+    .then(|| {
+        let awaiting = payload.get("phase").and_then(Value::as_str) == Some("final_answer");
+        (awaiting, awaiting.then(|| assistant_output_text(payload)).flatten())
+    })
+}
+
+fn event_message_state(payload: &Value) -> Option<(bool, Option<String>)> {
+    (payload.get("type").and_then(Value::as_str) == Some("agent_message"))
+        .then(|| {
+            let awaiting = payload.get("phase").and_then(Value::as_str) == Some("final_answer");
+            (awaiting, awaiting.then(|| assistant_output_text(payload)).flatten())
+        })
+}
+
+fn assistant_output_text(payload: &Value) -> Option<String> {
+    payload
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|block| {
+                    matches!(
+                        block.get("type").and_then(Value::as_str),
+                        Some("output_text") | Some("text")
+                    )
+                    .then(|| block.get("text").and_then(Value::as_str))
+                    .flatten()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
 }
 
 fn update_token_count(entry: &Value, token_count: &mut u64) {
@@ -620,6 +702,44 @@ mod tests {
             snapshot.current_tool.as_ref().map(|a| a.tool.as_str()),
             Some("exec_command")
         );
+        assert!(!snapshot.awaiting_user_input);
+    }
+
+    #[test]
+    fn parse_codex_marks_final_answer_as_awaiting_user() {
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            concat!(
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"checking\"}]}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Need your approval to continue.\"}]}}\n"
+            ),
+        )
+        .expect("write fixture");
+
+        let snapshot = parse(file.path(), &ExtractOptions::default()).expect("parse");
+        assert!(snapshot.awaiting_user_input);
+        assert_eq!(
+            snapshot.awaiting_user_text.as_deref(),
+            Some("Need your approval to continue.")
+        );
+    }
+
+    #[test]
+    fn parse_codex_clears_awaiting_user_when_work_resumes() {
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            concat!(
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Which option do you want?\"}]}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}}\n"
+            ),
+        )
+        .expect("write fixture");
+
+        let snapshot = parse(file.path(), &ExtractOptions::default()).expect("parse");
+        assert!(!snapshot.awaiting_user_input);
+        assert!(snapshot.awaiting_user_text.is_none());
     }
 
     #[test]

@@ -15,11 +15,14 @@ pub(crate) fn parse(path: &Path, options: &ExtractOptions) -> Result<ParseSnapsh
     let mut recent_actions: Vec<Action> = Vec::new();
     let mut current_tool: Option<Action> = None;
     let mut token_count = 0u64;
+    let mut awaiting_user_input = false;
+    let mut awaiting_user_text: Option<String> = None;
 
     for entry in &parsed.entries {
         let ts = extract_timestamp(entry);
         update_user_task(entry, options, &mut user_task);
         update_token_count(entry, &mut token_count);
+        update_awaiting_user_state(entry, &mut awaiting_user_input, &mut awaiting_user_text);
         record_actions(
             &mut recent_actions,
             &mut current_tool,
@@ -33,6 +36,8 @@ pub(crate) fn parse(path: &Path, options: &ExtractOptions) -> Result<ParseSnapsh
         recent_actions,
         current_tool,
         token_count,
+        awaiting_user_input,
+        awaiting_user_text,
         commit_signal: None,
         events_seen: parsed.entries.len() as u64,
         malformed_lines_skipped: parsed.malformed_lines_skipped,
@@ -69,6 +74,34 @@ fn update_token_count(entry: &Value, token_count: &mut u64) {
         .map(|value| *token_count = value);
 }
 
+fn update_awaiting_user_state(
+    entry: &Value,
+    awaiting_user_input: &mut bool,
+    awaiting_user_text: &mut Option<String>,
+) {
+    if entry_type(entry) == "user" {
+        *awaiting_user_input = false;
+        *awaiting_user_text = None;
+        return;
+    }
+
+    let Some(message) = assistant_message(entry) else {
+        return;
+    };
+
+    if assistant_has_tool_use(message) {
+        *awaiting_user_input = false;
+        *awaiting_user_text = None;
+        return;
+    }
+
+    if assistant_has_text(message) {
+        let awaiting = assistant_turn_ended(message).unwrap_or(false);
+        *awaiting_user_input = awaiting;
+        *awaiting_user_text = awaiting.then(|| assistant_text(message)).flatten();
+    }
+}
+
 fn assistant_actions(entry: &Value, options: &ExtractOptions, ts: &Option<String>) -> Vec<Action> {
     assistant_message(entry)
         .and_then(|message| message.get("content").and_then(Value::as_array))
@@ -86,6 +119,61 @@ fn assistant_message(entry: &Value) -> Option<&Value> {
         .then_some(message(entry))
         .flatten()
         .filter(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+}
+
+fn assistant_has_tool_use(message: &Value) -> bool {
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .is_some_and(|blocks| {
+            blocks
+                .iter()
+                .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+        })
+}
+
+fn assistant_has_text(message: &Value) -> bool {
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .is_some_and(|blocks| {
+            blocks.iter().any(|block| {
+                block.get("type").and_then(Value::as_str) == Some("text")
+                    && block
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .is_some_and(|text| !text.is_empty())
+            })
+        })
+}
+
+fn assistant_text(message: &Value) -> Option<String> {
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|block| {
+                    (block.get("type").and_then(Value::as_str) == Some("text"))
+                        .then(|| block.get("text").and_then(Value::as_str))
+                        .flatten()
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty())
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+}
+
+fn assistant_turn_ended(message: &Value) -> Option<bool> {
+    message
+        .get("stop_reason")
+        .and_then(Value::as_str)
+        .map(|reason| reason == "end_turn")
 }
 
 fn block_action(block: &Value, options: &ExtractOptions, ts: &Option<String>) -> Option<Action> {
@@ -206,6 +294,42 @@ mod tests {
             snapshot.current_tool.as_ref().map(|a| a.tool.as_str()),
             Some("read_file")
         );
+        assert!(!snapshot.awaiting_user_input);
+    }
+
+    #[test]
+    fn parse_claude_marks_end_turn_text_as_awaiting_user() {
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            concat!(
+                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"Which option do you want?\"}]}}\n"
+            ),
+        )
+        .expect("write fixture");
+
+        let snapshot = parse(file.path(), &ExtractOptions::default()).expect("parse");
+        assert!(snapshot.awaiting_user_input);
+        assert_eq!(
+            snapshot.awaiting_user_text.as_deref(),
+            Some("Which option do you want?")
+        );
+    }
+
+    #[test]
+    fn parse_claude_does_not_mark_tool_use_turn_as_awaiting_user() {
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            concat!(
+                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"pwd\"}}]}}\n"
+            ),
+        )
+        .expect("write fixture");
+
+        let snapshot = parse(file.path(), &ExtractOptions::default()).expect("parse");
+        assert!(!snapshot.awaiting_user_input);
+        assert!(snapshot.awaiting_user_text.is_none());
     }
 
     #[test]

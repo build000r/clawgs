@@ -103,7 +103,10 @@ pub fn resolve_model_backend() -> ModelBackend {
 }
 
 pub fn default_model_for_backend(backend: ModelBackend) -> String {
-    thought_models(None, backend).into_iter().next().unwrap_or_default()
+    thought_models(None, backend)
+        .into_iter()
+        .next()
+        .unwrap_or_default()
 }
 
 pub fn thought_models(model_override: Option<&str>, backend: ModelBackend) -> Vec<String> {
@@ -128,9 +131,10 @@ impl ModelClient for OpenRouterModelClient {
     fn complete(&self, prompt: &str, model_override: Option<&str>) -> Result<String, String> {
         let api_key = std::env::var("OPENROUTER_API_KEY")
             .map_err(|_| "OPENROUTER_API_KEY not set".to_string())?;
-        complete_with_models(&candidate_models(model_override, ModelBackend::OpenRouter), |model| {
-            nonempty_openrouter_response(&self.client, prompt, model, &api_key)
-        })
+        complete_with_models(
+            &candidate_models(model_override, ModelBackend::OpenRouter),
+            |model| nonempty_openrouter_response(&self.client, prompt, model, &api_key),
+        )
     }
 }
 
@@ -411,7 +415,10 @@ fn candidate_models(model_override: Option<&str>, backend: ModelBackend) -> Vec<
 }
 
 fn configured_models(backend: ModelBackend) -> Vec<String> {
-    let configured: Vec<String> = MODEL_ENV_KEYS.iter().filter_map(|key| nonempty_env_var(key)).collect();
+    let configured: Vec<String> = MODEL_ENV_KEYS
+        .iter()
+        .filter_map(|key| nonempty_env_var(key))
+        .collect();
     if !configured.is_empty() {
         configured
     } else {
@@ -457,7 +464,11 @@ fn build_codex_exec_args(
 }
 
 fn failure_preview(stderr: &str, stdout: &str) -> String {
-    let merged = if stderr.trim().is_empty() { stdout } else { stderr };
+    let merged = if stderr.trim().is_empty() {
+        stdout
+    } else {
+        stderr
+    };
     let trimmed = merged.trim();
     if trimmed.is_empty() {
         "process exited without output".to_string()

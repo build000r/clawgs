@@ -84,6 +84,10 @@ pub struct Snapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_tool: Option<Action>,
     pub token_count: u64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub awaiting_user_input: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub awaiting_user_text: Option<String>,
     pub recent_actions: Vec<Action>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_signal: Option<CommitSignal>,
@@ -174,6 +178,8 @@ pub fn extract(
             user_task: parsed.user_task,
             current_tool: parsed.current_tool,
             token_count: parsed.token_count,
+            awaiting_user_input: parsed.awaiting_user_input,
+            awaiting_user_text: parsed.awaiting_user_text,
             recent_actions: parsed.recent_actions,
             commit_signal: parsed.commit_signal,
         },
@@ -185,6 +191,10 @@ pub fn extract(
         generated_at: Utc::now().to_rfc3339(),
         raw_events: parsed.raw_events,
     })
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 pub fn infer_tool_from_file(path: &Path) -> Result<AgentTool> {

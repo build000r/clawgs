@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
 use crate::{
-    discover_claude_paths, discover_codex_paths, extract, resolve_input, Action, AgentTool,
+    discover_claude_paths, discover_codex_paths, extract, resolve_input, AgentTool,
     ExtractOptions, Snapshot, ToolSelection,
 };
 
@@ -18,14 +18,10 @@ use super::protocol::{
     ThoughtState, ThoughtUpdate, TimingInfo,
 };
 
-const SUMMARY_HISTORY_CAP: usize = 10;
 const TERMINAL_CONTEXT_CHARS: usize = 800;
 const TERMINAL_MIN_MEANINGFUL_DELTA_CHARS: usize = 100;
 const MAX_THOUGHT_CHARS: usize = 120;
-const STATIC_SLEEPING_THOUGHT: &str = "Sleeping.";
 const DROWSY_AFTER_MS: i64 = 10_000;
-const SLEEPING_AFTER_MS: i64 = 30_000;
-const DEEP_SLEEP_AFTER_MS: i64 = 60_000;
 
 pub const DEFAULT_AGENT_PREAMBLE: &str = "You are a status reporter for a coding agent session.";
 pub const DEFAULT_TERMINAL_PREAMBLE: &str = "Terminal session status reporter.";
@@ -66,7 +62,8 @@ impl SessionRuntimeState {
             run_started_at,
             run_finished_at: initial_run_finished_at(session, now),
             last_emitted_thought: session.thought.clone(),
-            sleeping_emitted: is_sleeping_text(session.thought.as_deref()),
+            sleeping_emitted: session.thought_state == ThoughtState::Sleeping
+                && matches!(session.rest_state, RestState::Sleeping | RestState::DeepSleep),
             thought_state: session.thought_state,
             thought_source: session.thought_source,
             rest_state: session.rest_state,
@@ -103,24 +100,13 @@ impl SessionRuntimeState {
         }
     }
 
-    fn should_call_for_cadence(&self, config: &ThoughtConfig, now: DateTime<Utc>) -> bool {
-        match self.last_call_at {
-            Some(last_call) => {
-                let elapsed_ms = (now - last_call).num_milliseconds();
-                elapsed_ms >= self.cadence_for_state(config, now) as i64
-            }
-            None => true,
-        }
-    }
 }
 
 struct PreparedSessionContext {
-    context_snapshot: Option<Snapshot>,
     context_source: ContextSource,
     next_rest_state: RestState,
     next_commit_candidate: bool,
     objective_fingerprint: String,
-    objective_changed: bool,
 }
 
 pub struct EmitEngine {
@@ -206,7 +192,7 @@ impl EmitEngine {
                         .or_insert_with(|| {
                             SessionRuntimeState::initialize_from_session(session, request.now)
                         });
-                    let next_rest_state = rest_state_for_session(session, request.now);
+                    let next_rest_state = rest_state_for_session(session, None, request.now);
                     state.rest_state = next_rest_state;
                 }
                 return SyncResultMessage::new(
@@ -221,8 +207,7 @@ impl EmitEngine {
                     self.clients.insert(backend, client);
                 }
                 Err(err) => {
-                    metrics.last_backend_error =
-                        Some(format!("{}: {err}", backend.as_str()));
+                    metrics.last_backend_error = Some(format!("{}: {err}", backend.as_str()));
                     return SyncResultMessage::new(
                         request.id.clone(),
                         self.stream_instance_id.clone(),
@@ -271,7 +256,7 @@ impl EmitEngine {
                 .or_insert_with(|| {
                     SessionRuntimeState::initialize_from_session(session, request.now)
                 });
-            let next_rest_state = rest_state_for_session(session, request.now);
+            let next_rest_state = rest_state_for_session(session, None, request.now);
 
             let needs_clear = state.last_emitted_thought.is_some()
                 || session.thought.is_some()
@@ -290,6 +275,7 @@ impl EmitEngine {
                     request.now,
                     next_rest_state,
                     false,
+                    state.objective_fingerprint.clone(),
                 ));
                 state.last_emitted_thought = None;
                 state.thought_state = ThoughtState::Holding;
@@ -305,7 +291,7 @@ impl EmitEngine {
 }
 
 fn process_session(
-    model_client: &dyn ModelClient,
+    _model_client: &dyn ModelClient,
     stream_instance_id: &str,
     per_session: &mut HashMap<String, SessionRuntimeState>,
     request: &SyncRequest,
@@ -324,7 +310,6 @@ fn process_session(
     let state = per_session
         .entry(session.session_id.clone())
         .or_insert_with(|| SessionRuntimeState::initialize_from_session(session, request.now));
-    let next_rest_state = rest_state_for_session(session, request.now);
 
     // Invalidate stale claim when the pane's CWD has changed (e.g. new
     // claude session started in a different project within the same pane).
@@ -347,12 +332,14 @@ fn process_session(
     if resolved_path.is_some() {
         state.claimed_cwd = Some(session.cwd.clone());
     }
+    let next_rest_state = rest_state_for_session(session, context_snapshot.as_ref(), request.now);
     let next_commit_candidate = commit_candidate_for_context(context_snapshot.as_ref());
 
     if handle_sleeping_session(
         stream_instance_id,
         state,
         session,
+        context_snapshot.as_ref(),
         &request.config,
         context_source,
         request.now,
@@ -364,7 +351,7 @@ fn process_session(
         return;
     }
 
-    let woke_from_sleep = wake_from_sleep_if_needed(
+    if wake_from_sleep_if_needed(
         stream_instance_id,
         state,
         session,
@@ -374,7 +361,9 @@ fn process_session(
         next_rest_state,
         next_commit_candidate,
         updates,
-    );
+    ) {
+        return;
+    }
 
     let Some(prepared) = prepare_session_context(
         state,
@@ -389,34 +378,36 @@ fn process_session(
         return;
     };
 
-    if suppress_for_cadence_or_terminal_delta(
+    if clear_non_sleeping_thought_if_needed(
         stream_instance_id,
         state,
         session,
-        prepared.context_snapshot.as_ref(),
         &request.config,
         prepared.context_source,
-        prepared.objective_changed,
-        woke_from_sleep,
+        request.now,
         prepared.next_rest_state,
         prepared.next_commit_candidate,
-        request.now,
+        Some(prepared.objective_fingerprint.clone()),
         updates,
-        metrics,
     ) {
         return;
     }
 
-    emit_session_thought(
-        model_client,
+    if emit_passive_state_change_if_needed(
+        updates,
         stream_instance_id,
         state,
-        request,
         session,
-        &prepared,
-        updates,
-        metrics,
-    );
+        &request.config,
+        prepared.context_source,
+        prepared.next_rest_state,
+        prepared.next_commit_candidate,
+        request.now,
+    ) {
+        return;
+    }
+
+    metrics.suppressed += 1;
 }
 
 fn wake_from_sleep_if_needed(
@@ -446,6 +437,7 @@ fn wake_from_sleep_if_needed(
         now,
         next_rest_state,
         next_commit_candidate,
+        state.objective_fingerprint.clone(),
     ));
     state.thought_state = ThoughtState::Holding;
     state.thought_source = ThoughtSource::CarryForward;
@@ -472,15 +464,13 @@ fn prepare_session_context(
 
     let objective_fingerprint =
         objective_fingerprint_for_session(context_snapshot.as_ref(), session);
-    let objective_changed = update_objective_fingerprint(state, &objective_fingerprint, now);
+    update_objective_fingerprint(state, &objective_fingerprint, now);
 
     Some(PreparedSessionContext {
-        context_snapshot,
         context_source,
         next_rest_state,
         next_commit_candidate,
         objective_fingerprint,
-        objective_changed,
     })
 }
 
@@ -503,203 +493,11 @@ fn objective_fingerprint_for_session(
         .unwrap_or_else(|| terminal_objective_fingerprint(&session.replay_text, &session.state))
 }
 
-fn emit_session_thought(
-    model_client: &dyn ModelClient,
-    stream_instance_id: &str,
-    state: &mut SessionRuntimeState,
-    request: &SyncRequest,
-    session: &SessionSnapshot,
-    prepared: &PreparedSessionContext,
-    updates: &mut Vec<ThoughtUpdate>,
-    metrics: &mut SyncMetrics,
-) {
-    state.last_call_at = Some(request.now);
-    let prompt = prompt_for_session(prepared.context_snapshot.as_ref(), session, state, request);
-    let Some(raw_thought) =
-        complete_session_thought(model_client, &prompt, request, session, state, metrics)
-    else {
-        return;
-    };
-
-    let thought = sanitize_thought_text(&raw_thought);
-    if thought.is_empty() {
-        metrics.suppressed += 1;
-        return;
-    }
-
-    if handle_duplicate_generated_thought(
-        &thought,
-        updates,
-        stream_instance_id,
-        state,
-        session,
-        &request.config,
-        prepared.context_source,
-        prepared.next_rest_state,
-        prepared.next_commit_candidate,
-        request.now,
-        metrics,
-    ) {
-        return;
-    }
-
-    publish_generated_thought(
-        stream_instance_id,
-        state,
-        session,
-        &request.config,
-        &thought,
-        prepared,
-        request.now,
-        updates,
-        metrics,
-    );
-}
-
-fn prompt_for_session(
-    context_snapshot: Option<&Snapshot>,
-    session: &SessionSnapshot,
-    state: &SessionRuntimeState,
-    request: &SyncRequest,
-) -> String {
-    context_snapshot
-        .map(|snapshot| {
-            build_context_prompt(
-                snapshot,
-                &session.state,
-                &state.summary_history,
-                request.config.agent_prompt.as_deref(),
-            )
-        })
-        .unwrap_or_else(|| {
-            build_terminal_prompt(
-                &session.replay_text,
-                &session.state,
-                state.last_terminal_context.as_deref(),
-                request.config.terminal_prompt.as_deref(),
-            )
-        })
-}
-
-fn complete_session_thought(
-    model_client: &dyn ModelClient,
-    prompt: &str,
-    request: &SyncRequest,
-    session: &SessionSnapshot,
-    state: &mut SessionRuntimeState,
-    metrics: &mut SyncMetrics,
-) -> Option<String> {
-    match model_client.complete(prompt, request.config.model_override()) {
-        Ok(value) => Some(value),
-        Err(err) => {
-            metrics.suppressed += 1;
-            if metrics.last_backend_error.is_none() {
-                metrics.last_backend_error = Some(err);
-            }
-            state.last_terminal_context = Some(trim_terminal_context(&session.replay_text));
-            None
-        }
-    }
-}
-
-fn handle_duplicate_generated_thought(
-    thought: &str,
-    updates: &mut Vec<ThoughtUpdate>,
-    stream_instance_id: &str,
-    state: &mut SessionRuntimeState,
-    session: &SessionSnapshot,
-    config: &ThoughtConfig,
-    context_source: ContextSource,
-    next_rest_state: RestState,
-    next_commit_candidate: bool,
-    now: DateTime<Utc>,
-    metrics: &mut SyncMetrics,
-) -> bool {
-    if !is_duplicate_thought(state.last_emitted_thought.as_deref(), thought) {
-        return false;
-    }
-
-    if emit_passive_state_change_if_needed(
-        updates,
-        stream_instance_id,
-        state,
-        session,
-        config,
-        context_source,
-        next_rest_state,
-        next_commit_candidate,
-        now,
-    ) {
-        return true;
-    }
-    metrics.suppressed += 1;
-    true
-}
-
-fn publish_generated_thought(
-    stream_instance_id: &str,
-    state: &mut SessionRuntimeState,
-    session: &SessionSnapshot,
-    config: &ThoughtConfig,
-    thought: &str,
-    prepared: &PreparedSessionContext,
-    now: DateTime<Utc>,
-    updates: &mut Vec<ThoughtUpdate>,
-    metrics: &mut SyncMetrics,
-) {
-    let next_state = next_thought_state(prepared.objective_changed);
-    let token_count = token_count_for_context(prepared.context_snapshot.as_ref(), session);
-    updates.push(thought_update(
-        stream_instance_id,
-        state,
-        session,
-        Some(thought.to_string()),
-        token_count,
-        session.context_limit,
-        next_state,
-        ThoughtSource::Llm,
-        prepared.objective_changed,
-        now,
-        Some(prepared.objective_fingerprint.clone()),
-        prepared.next_rest_state,
-        prepared.next_commit_candidate,
-        config,
-        prepared.context_source,
-    ));
-
-    state.last_emitted_thought = Some(thought.to_string());
-    state.summary_history.push(thought.to_string());
-    if state.summary_history.len() > SUMMARY_HISTORY_CAP {
-        let start = state.summary_history.len() - SUMMARY_HISTORY_CAP;
-        state.summary_history = state.summary_history.split_off(start);
-    }
-    state.thought_state = next_state;
-    state.thought_source = ThoughtSource::Llm;
-    state.rest_state = prepared.next_rest_state;
-    state.commit_candidate = prepared.next_commit_candidate;
-    state.sleeping_emitted = false;
-    state.last_terminal_context = Some(trim_terminal_context(&session.replay_text));
-    metrics.llm_calls += 1;
-}
-
-fn next_thought_state(objective_changed: bool) -> ThoughtState {
-    if objective_changed {
-        ThoughtState::Active
-    } else {
-        ThoughtState::Holding
-    }
-}
-
-fn token_count_for_context(context_snapshot: Option<&Snapshot>, session: &SessionSnapshot) -> u64 {
-    context_snapshot
-        .map(|snapshot| snapshot.token_count)
-        .unwrap_or(session.token_count)
-}
-
 fn handle_sleeping_session(
     stream_instance_id: &str,
     state: &mut SessionRuntimeState,
     session: &SessionSnapshot,
+    context_snapshot: Option<&Snapshot>,
     config: &ThoughtConfig,
     context_source: ContextSource,
     now: DateTime<Utc>,
@@ -712,11 +510,13 @@ fn handle_sleeping_session(
         return false;
     }
 
+    let carried_thought = sleeping_thought_for_update(state, session, context_snapshot);
+    let carried_source = sleeping_thought_source(state);
     let should_emit_sleeping = state.thought_state != ThoughtState::Sleeping
         || !state.sleeping_emitted
-        || !is_sleeping_text(state.last_emitted_thought.as_deref())
         || state.rest_state != next_rest_state
-        || state.commit_candidate != next_commit_candidate;
+        || state.commit_candidate != next_commit_candidate
+        || state.last_emitted_thought != carried_thought;
 
     freeze_run(state, now);
     if should_emit_sleeping {
@@ -724,14 +524,14 @@ fn handle_sleeping_session(
             stream_instance_id,
             state,
             session,
-            Some(STATIC_SLEEPING_THOUGHT.to_string()),
+            carried_thought.clone(),
             session.token_count,
             session.context_limit,
             ThoughtState::Sleeping,
-            ThoughtSource::StaticSleeping,
+            carried_source,
             false,
             now,
-            Some("sleeping".to_string()),
+            state.objective_fingerprint.clone(),
             next_rest_state,
             next_commit_candidate,
             config,
@@ -743,10 +543,10 @@ fn handle_sleeping_session(
 
     state.sleeping_emitted = true;
     state.thought_state = ThoughtState::Sleeping;
-    state.thought_source = ThoughtSource::StaticSleeping;
+    state.thought_source = carried_source;
     state.rest_state = next_rest_state;
     state.commit_candidate = next_commit_candidate;
-    state.last_emitted_thought = Some(STATIC_SLEEPING_THOUGHT.to_string());
+    state.last_emitted_thought = carried_thought;
     state.last_terminal_context = Some(trim_terminal_context(&session.replay_text));
     true
 }
@@ -784,60 +584,6 @@ fn update_objective_fingerprint(
     objective_changed
 }
 
-fn suppress_for_cadence_or_terminal_delta(
-    stream_instance_id: &str,
-    state: &mut SessionRuntimeState,
-    session: &SessionSnapshot,
-    context_snapshot: Option<&Snapshot>,
-    config: &ThoughtConfig,
-    context_source: ContextSource,
-    objective_changed: bool,
-    woke_from_sleep: bool,
-    next_rest_state: RestState,
-    next_commit_candidate: bool,
-    now: DateTime<Utc>,
-    updates: &mut Vec<ThoughtUpdate>,
-    metrics: &mut SyncMetrics,
-) -> bool {
-    if should_suppress_for_cadence(state, config, objective_changed, woke_from_sleep, now) {
-        return suppress_with_passive_state_change(
-            updates,
-            stream_instance_id,
-            state,
-            session,
-            config,
-            context_source,
-            next_rest_state,
-            next_commit_candidate,
-            now,
-            metrics,
-        );
-    }
-
-    if should_suppress_for_terminal_delta(
-        session,
-        state,
-        context_snapshot,
-        objective_changed,
-        woke_from_sleep,
-    ) {
-        return suppress_with_passive_state_change(
-            updates,
-            stream_instance_id,
-            state,
-            session,
-            config,
-            context_source,
-            next_rest_state,
-            next_commit_candidate,
-            now,
-            metrics,
-        );
-    }
-
-    false
-}
-
 fn clear_thought_update(
     stream_instance_id: &str,
     state: &mut SessionRuntimeState,
@@ -847,6 +593,7 @@ fn clear_thought_update(
     now: DateTime<Utc>,
     rest_state: RestState,
     commit_candidate: bool,
+    objective_fingerprint: Option<String>,
 ) -> ThoughtUpdate {
     thought_update(
         stream_instance_id,
@@ -859,7 +606,7 @@ fn clear_thought_update(
         ThoughtSource::CarryForward,
         false,
         now,
-        None,
+        objective_fingerprint,
         rest_state,
         commit_candidate,
         config,
@@ -914,6 +661,59 @@ fn current_thought_for_update(
         .or_else(|| session.thought.clone())
 }
 
+fn clear_non_sleeping_thought_if_needed(
+    stream_instance_id: &str,
+    state: &mut SessionRuntimeState,
+    session: &SessionSnapshot,
+    config: &ThoughtConfig,
+    context_source: ContextSource,
+    now: DateTime<Utc>,
+    next_rest_state: RestState,
+    next_commit_candidate: bool,
+    objective_fingerprint: Option<String>,
+    updates: &mut Vec<ThoughtUpdate>,
+) -> bool {
+    if state.thought_state == ThoughtState::Sleeping
+        || current_thought_for_update(state, session).is_none()
+    {
+        return false;
+    }
+
+    updates.push(clear_thought_update(
+        stream_instance_id,
+        state,
+        session,
+        config,
+        context_source,
+        now,
+        next_rest_state,
+        next_commit_candidate,
+        objective_fingerprint,
+    ));
+    state.last_call_at = None;
+    state.last_emitted_thought = None;
+    state.summary_history.clear();
+    state.thought_state = ThoughtState::Holding;
+    state.thought_source = ThoughtSource::CarryForward;
+    state.rest_state = next_rest_state;
+    state.commit_candidate = next_commit_candidate;
+    state.sleeping_emitted = false;
+    state.last_terminal_context = Some(trim_terminal_context(&session.replay_text));
+    true
+}
+
+fn sleeping_thought_for_update(
+    state: &SessionRuntimeState,
+    session: &SessionSnapshot,
+    context_snapshot: Option<&Snapshot>,
+) -> Option<String> {
+    context_snapshot
+        .and_then(|snapshot| snapshot.awaiting_user_text.as_deref())
+        .map(sanitize_thought_text)
+        .filter(|thought| !thought.is_empty())
+        .or_else(|| current_thought_for_update(state, session))
+}
+
 fn thought_update(
     stream_instance_id: &str,
     state: &mut SessionRuntimeState,
@@ -951,69 +751,20 @@ fn thought_update(
     }
 }
 
-fn rest_state_for_session(session: &SessionSnapshot, now: DateTime<Utc>) -> RestState {
+fn rest_state_for_session(
+    session: &SessionSnapshot,
+    context_snapshot: Option<&Snapshot>,
+    now: DateTime<Utc>,
+) -> RestState {
     match (session.exited, &session.state) {
         (true, _) | (_, SessionState::Exited) => RestState::DeepSleep,
+        _ if context_snapshot.is_some_and(|snapshot| snapshot.awaiting_user_input) => {
+            RestState::Sleeping
+        }
         (false, SessionState::Idle | SessionState::Attention) => {
             idle_rest_state((now - session.last_activity_at).num_milliseconds().max(0))
         }
         _ => RestState::Active,
-    }
-}
-
-fn should_suppress_for_cadence(
-    state: &SessionRuntimeState,
-    config: &ThoughtConfig,
-    objective_changed: bool,
-    woke_from_sleep: bool,
-    now: DateTime<Utc>,
-) -> bool {
-    !objective_changed && !woke_from_sleep && !state.should_call_for_cadence(config, now)
-}
-
-fn should_suppress_for_terminal_delta(
-    session: &SessionSnapshot,
-    state: &SessionRuntimeState,
-    context_snapshot: Option<&Snapshot>,
-    objective_changed: bool,
-    woke_from_sleep: bool,
-) -> bool {
-    context_snapshot.is_none()
-        && !objective_changed
-        && !woke_from_sleep
-        && !has_meaningful_terminal_delta(
-            &session.replay_text,
-            state.last_terminal_context.as_deref(),
-        )
-}
-
-fn suppress_with_passive_state_change(
-    updates: &mut Vec<ThoughtUpdate>,
-    stream_instance_id: &str,
-    state: &mut SessionRuntimeState,
-    session: &SessionSnapshot,
-    config: &ThoughtConfig,
-    context_source: ContextSource,
-    next_rest_state: RestState,
-    next_commit_candidate: bool,
-    now: DateTime<Utc>,
-    metrics: &mut SyncMetrics,
-) -> bool {
-    if emit_passive_state_change_if_needed(
-        updates,
-        stream_instance_id,
-        state,
-        session,
-        config,
-        context_source,
-        next_rest_state,
-        next_commit_candidate,
-        now,
-    ) {
-        true
-    } else {
-        metrics.suppressed += 1;
-        true
     }
 }
 
@@ -1025,11 +776,7 @@ fn commit_candidate_for_context(context_snapshot: Option<&Snapshot>) -> bool {
 }
 
 fn idle_rest_state(idle_ms: i64) -> RestState {
-    if idle_ms >= DEEP_SLEEP_AFTER_MS {
-        RestState::DeepSleep
-    } else if idle_ms >= SLEEPING_AFTER_MS {
-        RestState::Sleeping
-    } else if idle_ms >= DROWSY_AFTER_MS {
+    if idle_ms >= DROWSY_AFTER_MS {
         RestState::Drowsy
     } else {
         RestState::Active
@@ -1049,13 +796,15 @@ fn context_source_for_snapshot(context_snapshot: Option<&Snapshot>) -> ContextSo
 }
 
 fn initial_run_started_at(session: &SessionSnapshot, now: DateTime<Utc>) -> DateTime<Utc> {
-    clamp_to_now(session.thought_updated_at.unwrap_or(session.last_activity_at), now)
+    clamp_to_now(
+        session
+            .thought_updated_at
+            .unwrap_or(session.last_activity_at),
+        now,
+    )
 }
 
-fn initial_run_finished_at(
-    session: &SessionSnapshot,
-    now: DateTime<Utc>,
-) -> Option<DateTime<Utc>> {
+fn initial_run_finished_at(session: &SessionSnapshot, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
     if session.exited || is_sleeping_rest_state(session.rest_state) {
         Some(clamp_to_now(session.thought_updated_at.unwrap_or(now), now))
     } else {
@@ -1064,7 +813,11 @@ fn initial_run_finished_at(
 }
 
 fn clamp_to_now(value: DateTime<Utc>, now: DateTime<Utc>) -> DateTime<Utc> {
-    if value > now { now } else { value }
+    if value > now {
+        now
+    } else {
+        value
+    }
 }
 
 fn restart_run(state: &mut SessionRuntimeState, now: DateTime<Utc>) {
@@ -1114,13 +867,10 @@ fn saturating_elapsed_ms(start: DateTime<Utc>, end: DateTime<Utc>) -> u64 {
     (end - start).num_milliseconds().max(0) as u64
 }
 
-fn is_sleeping_text(thought: Option<&str>) -> bool {
-    match thought {
-        Some(value) => {
-            let normalized = value.trim().to_lowercase();
-            normalized == "sleeping." || normalized == "sleeping"
-        }
-        None => false,
+fn sleeping_thought_source(state: &SessionRuntimeState) -> ThoughtSource {
+    match state.thought_source {
+        ThoughtSource::StaticSleeping => ThoughtSource::CarryForward,
+        source => source,
     }
 }
 
@@ -1253,142 +1003,6 @@ fn tool_selection_for_session(tool: Option<&str>) -> Option<ToolSelection> {
     }
 }
 
-fn build_context_prompt(
-    snapshot: &Snapshot,
-    state: &SessionState,
-    summary_history: &[String],
-    custom_preamble: Option<&str>,
-) -> String {
-    let mut parts = vec![
-        custom_preamble
-            .unwrap_or(DEFAULT_AGENT_PREAMBLE)
-            .to_string(),
-        format!("State: {}", state_label(state)),
-    ];
-    parts.extend(task_lines(snapshot.user_task.as_deref()));
-    parts.extend(summary_history_lines(summary_history));
-    parts.extend(action_lines(&snapshot.recent_actions));
-    parts.extend(current_tool_lines(snapshot.current_tool.as_ref()));
-    parts.extend(context_prompt_tail());
-    parts.join("\n")
-}
-
-fn task_lines(task: Option<&str>) -> Vec<String> {
-    task.map(|task| vec![format!("Task: {task}")])
-        .unwrap_or_default()
-}
-
-fn summary_history_lines(summary_history: &[String]) -> Vec<String> {
-    if summary_history.is_empty() {
-        return Vec::new();
-    }
-
-    let mut lines = vec!["Recent status:".to_string()];
-    lines.extend(
-        summary_history
-            .iter()
-            .rev()
-            .take(3)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .map(|status| format!("  {status}")),
-    );
-    lines
-}
-
-fn action_lines(actions: &[Action]) -> Vec<String> {
-    if actions.is_empty() {
-        return Vec::new();
-    }
-
-    let mut lines = vec!["Actions:".to_string()];
-    lines.extend(actions.iter().map(format_action_line));
-    lines
-}
-
-fn format_action_line(action: &Action) -> String {
-    if action.tool == "said" {
-        format!("  said: {}", action.detail.as_deref().unwrap_or_default())
-    } else {
-        format!(
-            "  {}{}",
-            action.tool,
-            detail_suffix(action.detail.as_deref())
-        )
-    }
-}
-
-fn current_tool_lines(action: Option<&Action>) -> Vec<String> {
-    action
-        .map(|action| {
-            vec![format!(
-                "Now: {}{}",
-                action.tool,
-                detail_suffix(action.detail.as_deref())
-            )]
-        })
-        .unwrap_or_default()
-}
-
-fn detail_suffix(detail: Option<&str>) -> String {
-    detail.map(|value| format!(": {value}")).unwrap_or_default()
-}
-
-fn context_prompt_tail() -> Vec<String> {
-    vec![
-        String::new(),
-        "Write a 1-line status (max 60 chars). Explain the PURPOSE and WHY, not the tool or command.".to_string(),
-        "Do not speculate about anticipated future steps.".to_string(),
-        "Reply with ONLY the status line, nothing else.".to_string(),
-    ]
-}
-
-fn build_terminal_prompt(
-    context: &str,
-    state: &SessionState,
-    prev_context: Option<&str>,
-    custom_preamble: Option<&str>,
-) -> String {
-    let preamble = custom_preamble.unwrap_or(DEFAULT_TERMINAL_PREAMBLE);
-    let clean = trim_terminal_context(context);
-    let clean_prev = prev_context.map(trim_terminal_context);
-
-    let context_block = if let Some(prev) = clean_prev {
-        let tail: String = prev
-            .chars()
-            .rev()
-            .take(200)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        match clean.find(&tail) {
-            Some(index) => {
-                let delta = clean[index + tail.len()..].trim();
-                if !delta.is_empty() {
-                    format!("New output:\n{delta}")
-                } else {
-                    format!("Screen:\n{clean}")
-                }
-            }
-            None => format!("Screen:\n{clean}"),
-        }
-    } else {
-        format!("Screen:\n{clean}")
-    };
-
-    format!(
-        "{preamble}\n\
-         State: {}\n\
-         {context_block}\n\n\
-         Write a 1-line status (max 60 chars). Infer the PURPOSE behind what's on screen — WHY is this happening, not WHAT command is running.\n\
-         Do not speculate about anticipated future steps.\n\
-         Reply with ONLY the status line, nothing else.",
-        state_label(state)
-    )
-}
-
 fn state_label(state: &SessionState) -> &'static str {
     match state {
         SessionState::Idle => "idle",
@@ -1456,21 +1070,6 @@ fn sanitize_thought_text(raw: &str) -> String {
     let mut trimmed: String = normalized.chars().take(MAX_THOUGHT_CHARS - 3).collect();
     trimmed.push_str("...");
     trimmed
-}
-
-fn is_duplicate_thought(previous: Option<&str>, next: &str) -> bool {
-    let Some(previous) = previous else {
-        return false;
-    };
-    normalize_for_compare(previous) == normalize_for_compare(next)
-}
-
-fn normalize_for_compare(value: &str) -> String {
-    value
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
 }
 
 fn trim_terminal_context(context: &str) -> String {
@@ -1689,7 +1288,7 @@ mod tests {
     }
 
     #[test]
-    fn emits_update_for_active_session() {
+    fn suppresses_thought_for_active_session() {
         let now = Utc::now();
         let mut engine = mock_engine("investigating failing auth tests");
 
@@ -1702,32 +1301,14 @@ mod tests {
 
         let result = engine.sync(&request);
         assert_eq!(result.msg_type, "sync_result");
-        assert_eq!(result.updates.len(), 1);
+        assert!(result.updates.is_empty());
         assert!(!result.stream_instance_id.is_empty());
-        assert_eq!(
-            result.updates[0].thought.as_deref(),
-            Some("investigating failing auth tests")
-        );
-        assert_eq!(
-            result.updates[0].stream_instance_id,
-            Some(result.stream_instance_id.clone())
-        );
-        assert_eq!(result.updates[0].emission_seq, Some(1));
-        let timing = result.updates[0].timing.as_ref().expect("timing");
-        assert_eq!(timing.run_started_at, now);
-        assert!(timing.run_finished_at.is_none());
-        assert_eq!(timing.run_elapsed_ms, 0);
-        assert_eq!(timing.idle_elapsed_ms, 0);
-
-        let cues = result.updates[0].cues.as_ref().expect("cues");
-        assert_eq!(cues.cadence_tier, CadenceTier::Hot);
-        assert_eq!(cues.cadence_ms, 15_000);
-        assert_eq!(cues.next_llm_eligible_at, now + Duration::milliseconds(15_000));
-        assert_eq!(cues.context_source, ContextSource::Terminal);
+        assert_eq!(result.metrics.llm_calls, 0);
+        assert!(result.metrics.suppressed > 0);
     }
 
     #[test]
-    fn cadence_gate_suppresses_rapid_repeat() {
+    fn repeat_active_syncs_stay_quiet() {
         let now = Utc::now();
         let mut engine = mock_engine("investigating failing auth tests");
 
@@ -1738,7 +1319,8 @@ mod tests {
             sessions: vec![sample_session(now)],
         };
         let first_result = engine.sync(&first);
-        assert_eq!(first_result.updates.len(), 1);
+        assert!(first_result.updates.is_empty());
+        assert_eq!(first_result.metrics.llm_calls, 0);
 
         let second = SyncRequest {
             id: "req-2".to_string(),
@@ -1748,11 +1330,12 @@ mod tests {
         };
         let second_result = engine.sync(&second);
         assert_eq!(second_result.updates.len(), 0);
+        assert_eq!(second_result.metrics.llm_calls, 0);
         assert!(second_result.metrics.suppressed > 0);
     }
 
     #[test]
-    fn model_completion_error_sets_last_backend_error() {
+    fn active_sessions_do_not_require_model_completion() {
         let now = Utc::now();
         let mut engine = failing_engine("codex exec failed: not authenticated");
 
@@ -1765,10 +1348,8 @@ mod tests {
 
         let result = engine.sync(&request);
         assert!(result.updates.is_empty());
-        assert_eq!(
-            result.metrics.last_backend_error.as_deref(),
-            Some("codex exec failed: not authenticated")
-        );
+        assert_eq!(result.metrics.llm_calls, 0);
+        assert!(result.metrics.last_backend_error.is_none());
         assert!(result.metrics.suppressed > 0);
     }
 
@@ -1779,121 +1360,120 @@ mod tests {
         session.state = SessionState::Idle;
 
         session.last_activity_at = now - Duration::milliseconds(9_999);
-        assert_eq!(rest_state_for_session(&session, now), RestState::Active);
+        assert_eq!(rest_state_for_session(&session, None, now), RestState::Active);
 
         session.last_activity_at = now - Duration::milliseconds(10_000);
-        assert_eq!(rest_state_for_session(&session, now), RestState::Drowsy);
+        assert_eq!(rest_state_for_session(&session, None, now), RestState::Drowsy);
 
         session.last_activity_at = now - Duration::milliseconds(30_000);
-        assert_eq!(rest_state_for_session(&session, now), RestState::Sleeping);
+        assert_eq!(rest_state_for_session(&session, None, now), RestState::Drowsy);
 
         session.last_activity_at = now - Duration::milliseconds(60_000);
-        assert_eq!(rest_state_for_session(&session, now), RestState::DeepSleep);
+        assert_eq!(rest_state_for_session(&session, None, now), RestState::Drowsy);
     }
 
     #[test]
-    fn idle_session_emits_sleeping() {
+    fn awaiting_user_context_sleeps_immediately() {
         let now = Utc::now();
-        let mut engine = mock_engine("unused");
-
         let mut session = sample_session(now);
         session.state = SessionState::Idle;
-        session.last_activity_at = now - Duration::milliseconds(31_000);
-
-        let request = SyncRequest {
-            id: "req-1".to_string(),
-            now,
-            config: ThoughtConfig::default(),
-            sessions: vec![session],
+        let context = Snapshot {
+            user_task: None,
+            current_tool: None,
+            token_count: 0,
+            awaiting_user_input: true,
+            awaiting_user_text: Some("Need your approval to continue.".to_string()),
+            recent_actions: Vec::new(),
+            commit_signal: None,
         };
 
-        let result = engine.sync(&request);
-        assert_eq!(result.updates.len(), 1);
-        assert_eq!(result.updates[0].thought.as_deref(), Some("Sleeping."));
-        assert_eq!(result.updates[0].thought_state, ThoughtState::Sleeping);
-        assert_eq!(result.updates[0].emission_seq, Some(1));
+        assert_eq!(
+            rest_state_for_session(&session, Some(&context), now),
+            RestState::Sleeping
+        );
     }
 
     #[test]
-    fn attention_session_emits_sleeping() {
+    fn sleeping_transition_uses_transcript_reply_text() {
         let now = Utc::now();
-        let mut engine = mock_engine("unused");
-
         let mut session = sample_session(now);
         session.state = SessionState::Attention;
-        session.last_activity_at = now - Duration::milliseconds(31_000);
 
-        let request = SyncRequest {
-            id: "req-1".to_string(),
-            now,
-            config: ThoughtConfig::default(),
-            sessions: vec![session],
+        let mut state = SessionRuntimeState::initialize_from_session(&session, now);
+        let mut updates = Vec::new();
+        let mut metrics = SyncMetrics::default();
+        let context = Snapshot {
+            user_task: None,
+            current_tool: None,
+            token_count: 0,
+            awaiting_user_input: true,
+            awaiting_user_text: Some("Need your decision on the migration.".to_string()),
+            recent_actions: Vec::new(),
+            commit_signal: None,
         };
 
-        let result = engine.sync(&request);
-        assert_eq!(result.updates.len(), 1);
-        assert_eq!(result.updates[0].thought.as_deref(), Some("Sleeping."));
-        assert_eq!(result.updates[0].thought_state, ThoughtState::Sleeping);
-        assert_eq!(result.updates[0].rest_state, RestState::Sleeping);
-        assert!(!result.updates[0].commit_candidate);
-    }
-
-    #[test]
-    fn sleeping_transition_freezes_elapsed_time() {
-        let now = Utc::now();
-        let mut engine = mock_engine("unused");
-
-        let mut session = sample_session(now);
-        session.state = SessionState::Attention;
-        session.last_activity_at = now - Duration::milliseconds(31_000);
-
-        let first = engine.sync(&SyncRequest {
-            id: "req-1".to_string(),
+        let handled = handle_sleeping_session(
+            "stream-a",
+            &mut state,
+            &session,
+            Some(&context),
+            &ThoughtConfig::default(),
+            ContextSource::Transcript,
             now,
-            config: ThoughtConfig::default(),
-            sessions: vec![session.clone()],
-        });
-        let first_timing = first.updates[0].timing.as_ref().expect("first timing");
-        let first_elapsed = first_timing.run_elapsed_ms;
-        let first_finished_at = first_timing.run_finished_at.expect("first finished at");
+            RestState::Sleeping,
+            false,
+            &mut updates,
+            &mut metrics,
+        );
 
-        let second = engine.sync(&SyncRequest {
-            id: "req-2".to_string(),
-            now: now + Duration::seconds(40),
-            config: ThoughtConfig::default(),
-            sessions: vec![session],
-        });
-
-        assert_eq!(second.updates.len(), 1);
-        assert_eq!(second.updates[0].rest_state, RestState::DeepSleep);
-        let second_timing = second.updates[0].timing.as_ref().expect("second timing");
-        assert_eq!(second_timing.run_finished_at, Some(first_finished_at));
-        assert_eq!(second_timing.run_elapsed_ms, first_elapsed);
+        assert!(handled);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(
+            updates[0].thought.as_deref(),
+            Some("Need your decision on the migration.")
+        );
+        assert_eq!(updates[0].thought_state, ThoughtState::Sleeping);
+        assert_eq!(updates[0].thought_source, ThoughtSource::CarryForward);
+        assert_eq!(updates[0].rest_state, RestState::Sleeping);
+        let timing = updates[0].timing.as_ref().expect("timing");
+        assert_eq!(timing.run_finished_at, Some(now));
     }
 
     #[test]
     fn emitted_sleeping_update_serializes_rest_state_explicitly() {
         let now = Utc::now();
-        let mut engine = mock_engine("unused");
-
         let mut session = sample_session(now);
         session.state = SessionState::Attention;
-        session.last_activity_at = now - Duration::milliseconds(31_000);
+        session.thought = Some("Waiting on your confirmation.".to_string());
+        let mut state = SessionRuntimeState::initialize_from_session(&session, now);
+        let mut updates = Vec::new();
+        let mut metrics = SyncMetrics::default();
 
-        let result = engine.sync(&SyncRequest {
-            id: "req-1".to_string(),
+        handle_sleeping_session(
+            "stream-a",
+            &mut state,
+            &session,
+            None,
+            &ThoughtConfig::default(),
+            ContextSource::Transcript,
             now,
-            config: ThoughtConfig::default(),
-            sessions: vec![session],
-        });
+            RestState::Sleeping,
+            false,
+            &mut updates,
+            &mut metrics,
+        );
 
         let serialized =
-            serde_json::to_value(&result.updates[0]).expect("sleeping update should serialize");
+            serde_json::to_value(&updates[0]).expect("sleeping update should serialize");
         assert_eq!(
             serialized
                 .get("rest_state")
                 .and_then(|value| value.as_str()),
             Some("sleeping")
+        );
+        assert_eq!(
+            serialized.get("thought").and_then(|value| value.as_str()),
+            Some("Waiting on your confirmation.")
         );
     }
 
@@ -1939,8 +1519,7 @@ mod tests {
             config: ThoughtConfig::default(),
             sessions: vec![session.clone()],
         });
-        assert_eq!(first.updates.len(), 1);
-        assert!(!first.updates[0].commit_candidate);
+        assert!(first.updates.is_empty());
 
         engine
             .per_session
@@ -1972,12 +1551,9 @@ mod tests {
             sessions: vec![session],
         });
         assert_eq!(second.updates.len(), 1);
-        assert_eq!(
-            second.updates[0].thought.as_deref(),
-            Some("stabilizing preview widget behavior")
-        );
+        assert!(second.updates[0].thought.is_none());
         assert!(second.updates[0].commit_candidate);
-        assert_eq!(second.updates[0].emission_seq, Some(2));
+        assert_eq!(second.updates[0].emission_seq, Some(1));
     }
 
     #[test]
@@ -2052,44 +1628,52 @@ mod tests {
     #[test]
     fn no_op_scan_does_not_advance_emission_seq() {
         let now = Utc::now();
-        let mut engine = mock_engine("unused");
+        let mut session = sample_session(now);
+        session.state = SessionState::Attention;
+        session.thought = Some("Waiting on approval.".to_string());
+        session.thought_source = ThoughtSource::CarryForward;
 
-        let mut sleeping = sample_session(now);
-        sleeping.state = SessionState::Idle;
-        sleeping.last_activity_at = now - Duration::milliseconds(31_000);
+        let mut state = SessionRuntimeState::initialize_from_session(&session, now);
+        let mut first_updates = Vec::new();
+        let mut first_metrics = SyncMetrics::default();
 
-        let first = engine.sync(&SyncRequest {
-            id: "req-1".to_string(),
+        handle_sleeping_session(
+            "stream-a",
+            &mut state,
+            &session,
+            None,
+            &ThoughtConfig::default(),
+            ContextSource::Transcript,
             now,
-            config: ThoughtConfig::default(),
-            sessions: vec![sleeping.clone()],
-        });
-        assert_eq!(first.updates.len(), 1);
-        assert_eq!(first.updates[0].emission_seq, Some(1));
+            RestState::Sleeping,
+            false,
+            &mut first_updates,
+            &mut first_metrics,
+        );
+        assert_eq!(first_updates.len(), 1);
+        assert_eq!(first_updates[0].emission_seq, Some(1));
 
-        let second = engine.sync(&SyncRequest {
-            id: "req-2".to_string(),
-            now: now + Duration::seconds(1),
-            config: ThoughtConfig::default(),
-            sessions: vec![sleeping],
-        });
-        assert!(second.updates.is_empty());
-
-        let waking = sample_session(now + Duration::seconds(2));
-        let third = engine.sync(&SyncRequest {
-            id: "req-3".to_string(),
-            now: now + Duration::seconds(2),
-            config: ThoughtConfig::default(),
-            sessions: vec![waking],
-        });
-        assert_eq!(third.updates.len(), 2);
-        assert_eq!(third.updates[0].thought, None);
-        assert_eq!(third.updates[0].emission_seq, Some(2));
-        assert_eq!(third.updates[1].emission_seq, Some(3));
+        let mut second_updates = Vec::new();
+        let mut second_metrics = SyncMetrics::default();
+        handle_sleeping_session(
+            "stream-a",
+            &mut state,
+            &session,
+            None,
+            &ThoughtConfig::default(),
+            ContextSource::Transcript,
+            now + Duration::seconds(1),
+            RestState::Sleeping,
+            false,
+            &mut second_updates,
+            &mut second_metrics,
+        );
+        assert!(second_updates.is_empty());
+        assert_eq!(state.emission_seq, 1);
     }
 
     #[test]
-    fn wake_restarts_run_timer_and_bypasses_cadence() {
+    fn waking_from_sleep_clears_waiting_thought() {
         let now = Utc::now();
         let mut engine = mock_engine("working through auth fallback");
 
@@ -2099,31 +1683,34 @@ mod tests {
             config: ThoughtConfig::default(),
             sessions: vec![sample_session(now)],
         });
-        assert_eq!(active.updates.len(), 1);
+        assert!(active.updates.is_empty());
 
-        let mut sleeping = sample_session(now + Duration::seconds(31));
-        sleeping.state = SessionState::Attention;
-        sleeping.last_activity_at = now;
-        let sleeping_result = engine.sync(&SyncRequest {
-            id: "req-2".to_string(),
-            now: now + Duration::seconds(31),
-            config: ThoughtConfig::default(),
-            sessions: vec![sleeping],
-        });
-        assert_eq!(sleeping_result.updates.len(), 1);
-        assert_eq!(sleeping_result.updates[0].thought.as_deref(), Some("Sleeping."));
+        let sleeping_at = now + Duration::seconds(31);
+        let state = engine
+            .per_session
+            .get_mut("sess-1")
+            .expect("state should exist after first sync");
+        state.thought_state = ThoughtState::Sleeping;
+        state.thought_source = ThoughtSource::CarryForward;
+        state.rest_state = RestState::Sleeping;
+        state.sleeping_emitted = true;
+        state.last_emitted_thought = Some("Waiting on your reply.".to_string());
+        state.run_finished_at = Some(sleeping_at);
 
         let waking_now = now + Duration::seconds(32);
         let waking = sample_session(waking_now);
         let waking_result = engine.sync(&SyncRequest {
-            id: "req-3".to_string(),
+            id: "req-2".to_string(),
             now: waking_now,
             config: ThoughtConfig::default(),
             sessions: vec![waking],
         });
 
-        assert_eq!(waking_result.updates.len(), 2);
-        let clear_timing = waking_result.updates[0].timing.as_ref().expect("clear timing");
+        assert_eq!(waking_result.updates.len(), 1);
+        let clear_timing = waking_result.updates[0]
+            .timing
+            .as_ref()
+            .expect("clear timing");
         assert_eq!(clear_timing.run_started_at, waking_now);
         assert!(clear_timing.run_finished_at.is_none());
         assert_eq!(clear_timing.run_elapsed_ms, 0);
@@ -2131,17 +1718,7 @@ mod tests {
         let clear_cues = waking_result.updates[0].cues.as_ref().expect("clear cues");
         assert_eq!(clear_cues.cadence_tier, CadenceTier::Hot);
         assert_eq!(clear_cues.next_llm_eligible_at, waking_now);
-
-        let thought_timing = waking_result.updates[1].timing.as_ref().expect("thought timing");
-        assert_eq!(thought_timing.run_started_at, waking_now);
-        assert!(thought_timing.run_finished_at.is_none());
-
-        let thought_cues = waking_result.updates[1].cues.as_ref().expect("thought cues");
-        assert_eq!(thought_cues.cadence_tier, CadenceTier::Hot);
-        assert_eq!(
-            thought_cues.next_llm_eligible_at,
-            waking_now + Duration::milliseconds(15_000)
-        );
+        assert!(waking_result.updates[0].thought.is_none());
     }
 
     #[test]
@@ -2201,8 +1778,7 @@ mod tests {
             sessions: vec![session],
         });
 
-        assert_eq!(result.updates.len(), 1);
-        assert_eq!(result.updates[0].token_count, 222);
+        assert!(result.updates.is_empty());
         let state = engine
             .per_session
             .get("tmux:work:1.0:%1")
@@ -2307,7 +1883,7 @@ mod tests {
     }
 
     #[test]
-    fn meaningful_terminal_output_unblocks_first_thought_on_later_sync() {
+    fn meaningful_terminal_output_stays_quiet_without_sleep() {
         let now = Utc::now();
         let mut engine = mock_engine("isolating auth regression");
         let mut bootstrap = sample_session(now);
@@ -2328,16 +1904,12 @@ mod tests {
             sessions: vec![sample_session(now + Duration::seconds(1))],
         });
 
-        assert_eq!(second.updates.len(), 1);
-        assert_eq!(second.updates[0].emission_seq, Some(1));
-        assert_eq!(
-            second.updates[0].thought.as_deref(),
-            Some("isolating auth regression")
-        );
+        assert!(second.updates.is_empty());
+        assert_eq!(second.metrics.llm_calls, 0);
     }
 
     #[test]
-    fn duplicate_thought_emits_rest_state_transition() {
+    fn rest_state_transition_emits_passive_update_without_thought() {
         let now = Utc::now();
         let mut engine = mock_engine("reviewing auth fallback");
         let mut first_session = sample_session(now);
@@ -2349,8 +1921,7 @@ mod tests {
             config: ThoughtConfig::default(),
             sessions: vec![first_session],
         });
-        assert_eq!(first.updates.len(), 1);
-        assert_eq!(first.updates[0].rest_state, RestState::Active);
+        assert!(first.updates.is_empty());
 
         let mut second_session = sample_session(now + Duration::seconds(20));
         second_session.state = SessionState::Attention;
@@ -2364,12 +1935,9 @@ mod tests {
         });
 
         assert_eq!(second.updates.len(), 1);
-        assert_eq!(
-            second.updates[0].thought.as_deref(),
-            Some("reviewing auth fallback")
-        );
+        assert!(second.updates[0].thought.is_none());
         assert_eq!(second.updates[0].rest_state, RestState::Drowsy);
-        assert_eq!(second.updates[0].thought_state, ThoughtState::Active);
+        assert_eq!(second.updates[0].thought_state, ThoughtState::Holding);
     }
 
     #[test]
@@ -2381,7 +1949,7 @@ mod tests {
     }
 
     #[test]
-    fn unique_transcript_context_allows_first_thought_without_terminal_delta() {
+    fn unique_transcript_context_claims_path_without_emitting_thought() {
         let _lock = crate::test_support::home_env_lock()
             .lock()
             .expect("home lock");
@@ -2421,12 +1989,7 @@ mod tests {
             sessions: vec![session],
         });
 
-        assert_eq!(result.updates.len(), 1);
-        assert_eq!(
-            result.updates[0].thought.as_deref(),
-            Some("fixing auth regression")
-        );
-        assert_eq!(result.updates[0].token_count, 456);
+        assert!(result.updates.is_empty());
         assert_eq!(
             engine
                 .per_session

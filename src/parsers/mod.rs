@@ -14,6 +14,8 @@ pub(crate) struct ParseSnapshot {
     pub recent_actions: Vec<Action>,
     pub current_tool: Option<Action>,
     pub token_count: u64,
+    pub awaiting_user_input: bool,
+    pub awaiting_user_text: Option<String>,
     pub commit_signal: Option<CommitSignal>,
     pub events_seen: u64,
     pub malformed_lines_skipped: u64,

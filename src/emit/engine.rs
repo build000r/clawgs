@@ -1025,67 +1025,103 @@ fn has_meaningful_terminal_delta(current: &str, previous: Option<&str>) -> bool 
 }
 
 fn changed_non_whitespace_chars(current: &str, previous: &str) -> usize {
-    let cur: Vec<char> = current.chars().collect();
-    let prev: Vec<char> = previous.chars().collect();
-    let prefix = shared_prefix_len(&cur, &prev);
-    let (cur_suffix, _prev_suffix) = shared_suffix_bounds(&cur, &prev, prefix);
+    // Iterate char-by-char without materializing Vec<char>. We need a shared
+    // prefix and shared suffix in chars (not bytes) so a multibyte char that
+    // spans the boundary doesn't get double-counted. Both inputs are bounded
+    // by trim_terminal_context() so we trade allocation for two linear scans.
+    let prefix_chars = shared_prefix_chars(current, previous);
+    let prefix_bytes_cur = char_offset_to_byte(current, prefix_chars);
+    let prefix_bytes_prev = char_offset_to_byte(previous, prefix_chars);
 
-    cur[prefix..cur_suffix]
-        .iter()
+    let cur_tail = &current[prefix_bytes_cur..];
+    let prev_tail = &previous[prefix_bytes_prev..];
+    let suffix_chars = shared_suffix_chars(cur_tail, prev_tail);
+    let cur_changed_end = byte_offset_from_end(cur_tail, suffix_chars);
+
+    cur_tail[..cur_changed_end]
+        .chars()
         .filter(|ch| !ch.is_whitespace())
         .count()
 }
 
-fn shared_prefix_len(cur: &[char], prev: &[char]) -> usize {
-    let mut prefix = 0usize;
-    while prefix < cur.len() && prefix < prev.len() && cur[prefix] == prev[prefix] {
-        prefix += 1;
-    }
-    prefix
+fn shared_prefix_chars(a: &str, b: &str) -> usize {
+    a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
 }
 
-fn shared_suffix_bounds(cur: &[char], prev: &[char], prefix: usize) -> (usize, usize) {
-    let mut cur_suffix = cur.len();
-    let mut prev_suffix = prev.len();
-    while cur_suffix > prefix
-        && prev_suffix > prefix
-        && cur[cur_suffix - 1] == prev[prev_suffix - 1]
-    {
-        cur_suffix -= 1;
-        prev_suffix -= 1;
+fn shared_suffix_chars(a: &str, b: &str) -> usize {
+    a.chars()
+        .rev()
+        .zip(b.chars().rev())
+        .take_while(|(x, y)| x == y)
+        .count()
+}
+
+fn char_offset_to_byte(value: &str, char_offset: usize) -> usize {
+    value
+        .char_indices()
+        .nth(char_offset)
+        .map(|(byte, _)| byte)
+        .unwrap_or(value.len())
+}
+
+fn byte_offset_from_end(value: &str, suffix_chars: usize) -> usize {
+    let mut iter = value.char_indices().rev();
+    let mut last_byte = value.len();
+    for _ in 0..suffix_chars {
+        match iter.next() {
+            Some((byte, _)) => last_byte = byte,
+            None => return 0,
+        }
     }
-    (cur_suffix, prev_suffix)
+    last_byte
 }
 
 fn sanitize_thought_text(raw: &str) -> String {
-    let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut normalized = String::with_capacity(raw.len());
+    for word in raw.split_whitespace() {
+        if !normalized.is_empty() {
+            normalized.push(' ');
+        }
+        normalized.push_str(word);
+    }
     if normalized.is_empty() {
         return String::new();
     }
 
-    if normalized.chars().count() <= MAX_THOUGHT_CHARS {
+    let mut iter = normalized.char_indices();
+    for _ in 0..MAX_THOUGHT_CHARS {
+        if iter.next().is_none() {
+            return normalized;
+        }
+    }
+    if iter.next().is_none() {
         return normalized;
     }
-
-    let mut trimmed: String = normalized.chars().take(MAX_THOUGHT_CHARS - 3).collect();
+    let cut = normalized
+        .char_indices()
+        .nth(MAX_THOUGHT_CHARS - 3)
+        .map(|(byte, _)| byte)
+        .unwrap_or(normalized.len());
+    let mut trimmed = String::with_capacity(cut + 3);
+    trimmed.push_str(&normalized[..cut]);
     trimmed.push_str("...");
     trimmed
 }
 
 fn trim_terminal_context(context: &str) -> String {
     let stripped = strip_ansi(context);
-    if stripped.chars().count() <= TERMINAL_CONTEXT_CHARS {
-        return stripped;
+    // Walk char_indices from the back to find the byte offset that yields
+    // exactly TERMINAL_CONTEXT_CHARS chars of suffix. If we run out, the
+    // string is already short enough and we return it whole.
+    let mut iter = stripped.char_indices().rev();
+    let mut cut = stripped.len();
+    for _ in 0..TERMINAL_CONTEXT_CHARS {
+        match iter.next() {
+            Some((byte, _)) => cut = byte,
+            None => return stripped,
+        }
     }
-
-    stripped
-        .chars()
-        .rev()
-        .take(TERMINAL_CONTEXT_CHARS)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
+    stripped[cut..].to_string()
 }
 
 fn strip_ansi(value: &str) -> String {
@@ -1198,11 +1234,19 @@ fn terminal_objective_fingerprint(context: &str, state: &SessionState) -> String
 }
 
 fn normalize_for_focus(value: &str) -> String {
-    value
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
+    let mut out = String::with_capacity(value.len());
+    for word in value.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out.make_ascii_lowercase();
+    // Cover non-ASCII case folding (rare in tool/task labels, but cheap).
+    if out.chars().any(|ch| ch.is_uppercase()) {
+        out = out.to_lowercase();
+    }
+    out
 }
 
 fn hash_string(value: &str) -> u64 {
@@ -1221,6 +1265,38 @@ mod tests {
     use super::*;
     use crate::emit::model_client::{ModelBackend, ModelClient};
     use crate::emit::protocol::{SessionSnapshot, SessionState, SyncRequest, ThoughtConfig};
+
+    #[test]
+    fn changed_non_whitespace_chars_handles_multibyte_prefix_and_suffix() {
+        // Identical strings — zero changed.
+        assert_eq!(changed_non_whitespace_chars("héllo世界", "héllo世界"), 0);
+        // Differ in middle, multibyte prefix and suffix shared.
+        assert_eq!(
+            changed_non_whitespace_chars("héABC世界", "héXYZ世界"),
+            3,
+            "should count only the 3 changed chars in the middle"
+        );
+        // Whitespace inside the change is excluded from the count.
+        assert_eq!(changed_non_whitespace_chars("a b c", "a x c"), 1);
+    }
+
+    #[test]
+    fn trim_terminal_context_keeps_suffix_under_limit() {
+        // Below TERMINAL_CONTEXT_CHARS, content is preserved verbatim (after
+        // ANSI/control stripping).
+        let small = "hello";
+        assert_eq!(trim_terminal_context(small), small);
+    }
+
+    #[test]
+    fn sanitize_thought_text_collapses_whitespace_and_truncates() {
+        assert_eq!(sanitize_thought_text("  foo   bar\n\tbaz "), "foo bar baz");
+        assert_eq!(sanitize_thought_text("   "), "");
+        let long = "a".repeat(MAX_THOUGHT_CHARS + 50);
+        let trimmed = sanitize_thought_text(&long);
+        assert!(trimmed.ends_with("..."));
+        assert_eq!(trimmed.chars().count(), MAX_THOUGHT_CHARS);
+    }
 
     struct MockModelClient {
         response: String,

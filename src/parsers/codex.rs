@@ -148,7 +148,34 @@ fn user_response_item_text(payload: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|role| *role == "user")
         .and_then(|_| extract_user_input_text(payload))
-        .filter(|text| text.chars().count() < 1000 && !text.starts_with('<'))
+        .filter(|text| text.chars().count() < 1000 && !is_harness_markup(text))
+}
+
+/// Returns true when `text` opens with a known harness-injected wrapper
+/// (system-reminder, command-name, bash-input, etc.) — these are not real
+/// user content and shouldn't be surfaced as the user task. Plain user input
+/// that happens to begin with `<html>`, `<template>`, or other XML-ish syntax
+/// is preserved.
+fn is_harness_markup(text: &str) -> bool {
+    const HARNESS_PREFIXES: &[&str] = &[
+        "<system-reminder",
+        "<system>",
+        "<command-name",
+        "<command-message",
+        "<command-args",
+        "<command-stdout",
+        "<command-stderr",
+        "<bash-input",
+        "<bash-stdout",
+        "<bash-stderr",
+        "<local-command-stdout",
+        "<local-command-stderr",
+        "<user-prompt-submit-hook",
+    ];
+    let trimmed = text.trim_start();
+    HARNESS_PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
 }
 
 fn user_event_message_text(payload: &Value) -> Option<String> {
@@ -839,6 +866,51 @@ mod tests {
         });
 
         assert_eq!(user_response_item_text(&payload), None);
+    }
+
+    #[test]
+    fn user_response_item_text_preserves_user_html_or_xml_content() {
+        for raw in [
+            "Here's my HTML: <template>...</template>",
+            "<html>my snippet</html>",
+            "<div>why is this not centered?</div>",
+            "<query> what does this do?",
+        ] {
+            let payload = serde_json::json!({
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": raw}
+                ]
+            });
+            assert_eq!(
+                user_response_item_text(&payload).as_deref(),
+                Some(raw),
+                "filter should not drop legitimate user input: {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn user_response_item_text_rejects_known_harness_wrappers() {
+        for raw in [
+            "<system-reminder>be quiet</system-reminder>",
+            "<command-name>codebase-audit</command-name>",
+            "<command-message>codebase-audit</command-message>",
+            "<bash-input>ls -la</bash-input>",
+            "<local-command-stdout>output</local-command-stdout>",
+        ] {
+            let payload = serde_json::json!({
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": raw}
+                ]
+            });
+            assert_eq!(
+                user_response_item_text(&payload),
+                None,
+                "filter should drop harness markup: {raw:?}"
+            );
+        }
     }
 
     #[test]

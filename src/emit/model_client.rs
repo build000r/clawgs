@@ -166,6 +166,32 @@ impl Drop for TempFileGuard {
     }
 }
 
+/// Codex `model_reasoning_effort` accepts a fixed set of values; any other
+/// value would be rejected by the upstream `codex exec` invocation later, so
+/// we fall back to the default at startup with a warning instead of failing
+/// the daemon mid-loop.
+const REASONING_EFFORT_ALLOWED: &[&str] = &["minimal", "low", "medium", "high"];
+/// Codex `model_verbosity` allowlist (same rationale as reasoning_effort).
+const VERBOSITY_ALLOWED: &[&str] = &["low", "medium", "high"];
+
+fn validated_codex_setting(
+    env_key: &str,
+    default: &str,
+    allowed: &[&str],
+) -> String {
+    match nonempty_env_var(env_key) {
+        Some(value) if allowed.iter().any(|candidate| *candidate == value) => value,
+        Some(value) => {
+            eprintln!(
+                "clawgs: ignoring {env_key}={value:?}; expected one of {allowed:?}. \
+                 Falling back to {default:?}."
+            );
+            default.to_string()
+        }
+        None => default.to_string(),
+    }
+}
+
 impl CodexCliModelClient {
     pub fn new() -> Self {
         Self {
@@ -174,10 +200,16 @@ impl CodexCliModelClient {
             workdir: nonempty_env_var(CODEX_WORKDIR_ENV)
                 .map(PathBuf::from)
                 .unwrap_or_else(std::env::temp_dir),
-            reasoning_effort: nonempty_env_var(CODEX_REASONING_ENV)
-                .unwrap_or_else(|| DEFAULT_CODEX_CLI_REASONING.to_string()),
-            verbosity: nonempty_env_var(CODEX_VERBOSITY_ENV)
-                .unwrap_or_else(|| DEFAULT_CODEX_CLI_VERBOSITY.to_string()),
+            reasoning_effort: validated_codex_setting(
+                CODEX_REASONING_ENV,
+                DEFAULT_CODEX_CLI_REASONING,
+                REASONING_EFFORT_ALLOWED,
+            ),
+            verbosity: validated_codex_setting(
+                CODEX_VERBOSITY_ENV,
+                DEFAULT_CODEX_CLI_VERBOSITY,
+                VERBOSITY_ALLOWED,
+            ),
         }
     }
 }
@@ -634,7 +666,8 @@ mod tests {
 
     use super::{
         build_codex_exec_args, default_model_for_backend, thought_models,
-        validate_backend_credentials, ModelBackend,
+        validate_backend_credentials, validated_codex_setting, ModelBackend,
+        REASONING_EFFORT_ALLOWED, VERBOSITY_ALLOWED,
     };
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -662,6 +695,40 @@ mod tests {
         std::env::remove_var("SWIMMERS_THOUGHT_MODEL");
         std::env::remove_var("SWIMMERS_THOUGHT_MODEL_2");
         std::env::remove_var("SWIMMERS_THOUGHT_MODEL_3");
+    }
+
+    #[test]
+    fn validated_codex_setting_accepts_allowlisted_values_and_rejects_others() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        std::env::set_var("CLAWGS_TEST_REASONING", "high");
+        assert_eq!(
+            validated_codex_setting("CLAWGS_TEST_REASONING", "low", REASONING_EFFORT_ALLOWED),
+            "high"
+        );
+
+        // Empty / whitespace-only values fall through to default.
+        std::env::set_var("CLAWGS_TEST_REASONING", "   ");
+        assert_eq!(
+            validated_codex_setting("CLAWGS_TEST_REASONING", "low", REASONING_EFFORT_ALLOWED),
+            "low"
+        );
+
+        // Bogus values fall back to default (with a stderr warning).
+        std::env::set_var("CLAWGS_TEST_REASONING", "evil\"; rm -rf /");
+        assert_eq!(
+            validated_codex_setting("CLAWGS_TEST_REASONING", "low", REASONING_EFFORT_ALLOWED),
+            "low"
+        );
+
+        // Verbosity allowlist excludes "minimal".
+        std::env::set_var("CLAWGS_TEST_VERBOSITY", "minimal");
+        assert_eq!(
+            validated_codex_setting("CLAWGS_TEST_VERBOSITY", "low", VERBOSITY_ALLOWED),
+            "low"
+        );
+
+        std::env::remove_var("CLAWGS_TEST_REASONING");
+        std::env::remove_var("CLAWGS_TEST_VERBOSITY");
     }
 
     #[test]

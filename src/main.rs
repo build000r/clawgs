@@ -28,10 +28,15 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Show built-in Claude/Codex transcripts and the snapshots they produce — no local logs or credentials needed.
     Demo(DemoArgs),
+    /// Normalize a Claude or Codex JSONL transcript into a `clawgs.v1` JSON snapshot on stdout.
     Extract(ExtractArgs),
+    /// Run the live emit protocol daemon (NDJSON over stdio); requires `--stdio`.
     Emit(EmitArgs),
+    /// Scan tmux panes, infer per-pane sessions, and emit changed thoughts as NDJSON.
     TmuxEmit(TmuxEmitArgs),
+    /// Send a one-shot rescan signal to a running `tmux-emit` daemon over its UDP-style unix socket.
     TmuxNotify(TmuxNotifyArgs),
     /// Print resolved daemon defaults as JSON.
     Defaults,
@@ -39,33 +44,42 @@ enum Commands {
 
 #[derive(Debug, Args)]
 struct ExtractArgs {
+    /// Pick the parser. `auto` picks the newest of Claude/Codex transcripts under the matching cwd.
     #[arg(long, value_enum, default_value_t = ToolArg::Auto)]
     tool: ToolArg,
 
+    /// Project working directory used to discover the transcript file. Defaults to the process cwd.
     #[arg(long)]
     cwd: Option<PathBuf>,
 
+    /// Explicit JSONL transcript path. Skips discovery; `--tool` may still be required if the format can't be inferred.
     #[arg(long)]
     input: Option<PathBuf>,
 
+    /// Pretty-print the JSON output (default: single-line compact).
     #[arg(long)]
     pretty: bool,
 
+    /// Maximum number of recent agent actions to retain in the snapshot.
     #[arg(long, default_value_t = 10)]
     max_actions: usize,
 
+    /// Truncation budget (in characters) for the user task field.
     #[arg(long, default_value_t = 300)]
     max_task_chars: usize,
 
+    /// Truncation budget (in characters) for per-action detail strings (commands, file paths, patterns).
     #[arg(long, default_value_t = 100)]
     max_detail_chars: usize,
 
+    /// Include the last 20 raw transcript events under `raw_events` for debugging.
     #[arg(long)]
     include_raw: bool,
 }
 
 #[derive(Debug, Args)]
 struct EmitArgs {
+    /// Run as an NDJSON daemon: read sync requests from stdin, write hello/sync_result/error to stdout.
     #[arg(long)]
     stdio: bool,
 }
@@ -86,57 +100,72 @@ enum DemoCommands {
 
 #[derive(Debug, Args)]
 struct DemoExtractArgs {
+    /// Which embedded fixture to replay: `claude` or `codex`.
     #[arg(long, value_enum, default_value_t = DemoToolArg::Codex)]
     tool: DemoToolArg,
 
+    /// Pretty-print the JSON output (default: single-line compact).
     #[arg(long)]
     pretty: bool,
 
+    /// Maximum number of recent agent actions to retain in the snapshot.
     #[arg(long, default_value_t = 10)]
     max_actions: usize,
 
+    /// Truncation budget (in characters) for the user task field.
     #[arg(long, default_value_t = 300)]
     max_task_chars: usize,
 
+    /// Truncation budget (in characters) for per-action detail strings.
     #[arg(long, default_value_t = 100)]
     max_detail_chars: usize,
 
+    /// Include the last 20 raw transcript events under `raw_events`.
     #[arg(long)]
     include_raw: bool,
 }
 
 #[derive(Debug, Args)]
 struct DemoEmitArgs {
+    /// Pretty-print the demo NDJSON exchange (default: one JSON object per line).
     #[arg(long)]
     pretty: bool,
 }
 
 #[derive(Debug, Args)]
 struct TmuxEmitArgs {
+    /// Polling interval in milliseconds between full pane rescans.
     #[arg(long, default_value_t = 15_000)]
     interval_ms: u64,
 
+    /// Maximum number of trailing terminal lines captured from each pane per scan.
     #[arg(long, default_value_t = 200)]
     max_capture_lines: usize,
 
+    /// Run a single scan and exit instead of looping forever.
     #[arg(long)]
     once: bool,
 
+    /// Override the model used for thought generation. Empty string defers to backend default.
     #[arg(long, default_value = "")]
     model: String,
 
+    /// Inline JSON-encoded `ThoughtConfig` (see references/emit-protocol-v1.md). Omitting it uses defaults.
     #[arg(long)]
     config_json: Option<String>,
 
+    /// Path to the unix datagram socket used by `tmux-notify` to wake this daemon.
     #[arg(long)]
     socket: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
 struct TmuxNotifyArgs {
+    /// Path to the running daemon's notify socket. Defaults to the same path the daemon picks.
     #[arg(long)]
     socket: Option<PathBuf>,
 
+    /// Free-form event tag included in the notify payload (for log-side correlation).
     #[arg(long, default_value = "tmux-event")]
     event: String,
 }
@@ -264,7 +293,11 @@ fn ensure_emit_stdio(args: &EmitArgs) -> Result<()> {
     if args.stdio {
         Ok(())
     } else {
-        anyhow::bail!("emit requires --stdio");
+        anyhow::bail!(
+            "`emit` runs as a daemon and requires --stdio.\n  \
+             Add --stdio to read sync requests from stdin and write hello/sync_result \
+             NDJSON to stdout, or run `clawgs demo emit` to see the protocol exchange."
+        );
     }
 }
 

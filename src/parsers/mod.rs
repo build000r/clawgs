@@ -66,10 +66,18 @@ pub(crate) fn read_jsonl(path: &Path, include_raw: bool) -> Result<ParsedLines> 
 }
 
 pub(crate) fn truncate(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
-        value.to_string()
-    } else {
-        value.chars().take(max_chars).collect()
+    // Single pass: walk char_indices up to max_chars + 1 to learn both whether
+    // truncation is needed and where the cut byte-offset is. Avoids the
+    // previous chars().count() + chars().take() double-walk on every call.
+    let mut iter = value.char_indices();
+    for _ in 0..max_chars {
+        if iter.next().is_none() {
+            return value.to_string();
+        }
+    }
+    match iter.next() {
+        None => value.to_string(),
+        Some((cut, _)) => value[..cut].to_string(),
     }
 }
 

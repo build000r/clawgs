@@ -225,9 +225,10 @@ pub fn discover_for_tool(cwd: &Path, tool: AgentTool) -> Result<ResolvedInput> {
         .map(|path| discovered_input(tool, path))
         .ok_or_else(|| {
             anyhow!(
-                "no {} transcript JSONL found for cwd {}",
-                tool.as_str(),
-                cwd.display()
+                "no {tool_name} transcript JSONL found for cwd {cwd}.\n  \
+                 Try: clawgs extract --tool {tool_name} --input <path/to/session.jsonl>",
+                tool_name = tool.as_str(),
+                cwd = cwd.display()
             )
         })
 }
@@ -238,7 +239,9 @@ pub fn discover_auto(cwd: &Path) -> Result<ResolvedInput> {
         (None, Some(path)) => Ok(discovered_input(AgentTool::Codex, path)),
         (Some(claude), Some(codex)) => Ok(newer_discovered_input(claude, codex)),
         (None, None) => Err(anyhow!(
-            "no Claude or Codex transcript JSONL found for cwd {}",
+            "no Claude or Codex transcript JSONL found for cwd {}.\n  \
+             Try: clawgs extract --input <path/to/session.jsonl>, or run \
+             `clawgs demo extract --tool codex` to see the snapshot format.",
             cwd.display()
         )),
     }

@@ -146,6 +146,26 @@ pub struct CodexCliModelClient {
     verbosity: String,
 }
 
+struct TempFileGuard {
+    paths: Vec<PathBuf>,
+}
+
+impl TempFileGuard {
+    fn new(paths: &[&Path]) -> Self {
+        Self {
+            paths: paths.iter().map(|p| p.to_path_buf()).collect(),
+        }
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 impl CodexCliModelClient {
     pub fn new() -> Self {
         Self {
@@ -183,6 +203,16 @@ impl ModelClient for CodexCliModelClient {
         let output_path = self.runtime_dir.join(format!("{stamp}.last.txt"));
         let stdout_path = self.runtime_dir.join(format!("{stamp}.stdout.log"));
         let stderr_path = self.runtime_dir.join(format!("{stamp}.stderr.log"));
+
+        // RAII guard: each invocation creates three files in `runtime_dir`.
+        // Without explicit cleanup they would accumulate forever in a
+        // long-lived `tmux-emit` daemon. Drop runs on every exit path,
+        // including early `?` returns, panics, and timeouts.
+        let _cleanup = TempFileGuard::new(&[
+            output_path.as_path(),
+            stdout_path.as_path(),
+            stderr_path.as_path(),
+        ]);
 
         let stdout_file = File::create(&stdout_path)
             .map_err(|error| format!("failed to create {}: {error}", stdout_path.display()))?;
@@ -757,5 +787,28 @@ mod tests {
             .expect_err("should fail without API key");
         assert!(err.starts_with("openrouter:"));
         assert!(err.contains("OPENROUTER_API_KEY"));
+    }
+
+    #[test]
+    fn temp_file_guard_removes_files_on_drop_and_tolerates_missing() {
+        use std::fs;
+        use tempfile::tempdir;
+        let dir = tempdir().expect("tempdir");
+        let present = dir.path().join("present.tmp");
+        let missing = dir.path().join("never-created.tmp");
+        fs::write(&present, b"data").expect("write fixture");
+        assert!(present.exists());
+
+        {
+            let _guard = super::TempFileGuard::new(&[present.as_path(), missing.as_path()]);
+        }
+
+        assert!(
+            !present.exists(),
+            "guard must delete the temp file on drop"
+        );
+        // Dropping with a missing path must not panic — long-lived daemons
+        // depend on this so a partially-created exec leaves no residue.
+        assert!(!missing.exists());
     }
 }

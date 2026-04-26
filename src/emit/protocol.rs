@@ -619,17 +619,17 @@ fn validate_optional_len(
 }
 
 fn normalize_optional_prompt(value: Option<String>) -> Option<String> {
-    match value {
-        Some(value) if value.is_empty() => None,
-        _ => value,
-    }
+    value
+        .map(|prompt| prompt.trim().to_string())
+        .filter(|prompt| !prompt.is_empty())
 }
 
 fn string_to_optional_prompt(value: String) -> Option<String> {
-    if value.is_empty() {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
         None
     } else {
-        Some(value)
+        Some(trimmed.to_string())
     }
 }
 
@@ -703,6 +703,30 @@ mod tests {
         cfg.normalize();
         assert!(cfg.agent_prompt.is_none());
         assert!(cfg.terminal_prompt.is_none());
+    }
+
+    #[test]
+    fn normalize_treats_whitespace_only_prompts_as_empty() {
+        let mut cfg = ThoughtConfig {
+            agent_prompt: Some("   ".to_string()),
+            terminal_prompt: Some("\t\n  ".to_string()),
+            ..ThoughtConfig::default()
+        };
+
+        cfg.normalize();
+        assert!(cfg.agent_prompt.is_none());
+        assert!(cfg.terminal_prompt.is_none());
+    }
+
+    #[test]
+    fn normalize_trims_surrounding_whitespace_on_prompts() {
+        let mut cfg = ThoughtConfig {
+            agent_prompt: Some("  you are a status reporter  ".to_string()),
+            ..ThoughtConfig::default()
+        };
+
+        cfg.normalize();
+        assert_eq!(cfg.agent_prompt.as_deref(), Some("you are a status reporter"));
     }
 
     #[test]

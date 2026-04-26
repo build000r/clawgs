@@ -134,6 +134,14 @@ fn user_task_text(entry: &Value) -> Option<String> {
     }
 }
 
+fn is_user_turn_entry(entry: &Value) -> bool {
+    match entry_type(entry) {
+        "response_item" => payload(entry).get("role").and_then(Value::as_str) == Some("user"),
+        "event_msg" => payload(entry).get("type").and_then(Value::as_str) == Some("user_message"),
+        _ => false,
+    }
+}
+
 fn user_response_item_text(payload: &Value) -> Option<String> {
     payload
         .get("role")
@@ -163,7 +171,15 @@ fn update_awaiting_user_state(
     awaiting_user_input: &mut bool,
     awaiting_user_text: &mut Option<String>,
 ) {
-    if user_task_text(entry).is_some() || event_payload(entry, "turn_aborted").is_some() {
+    // Use a structural check rather than `user_task_text(...).is_some()`. The
+    // task-text path filters out user turns whose content is markup-prefixed
+    // (e.g. `<system-reminder>...`), >=1000 chars, or whitespace-only — but
+    // those are still valid user turns that should clear the awaiting flag.
+    // Without this, an agent that finished a final-answer and then received a
+    // system-reminder-prefixed user reply would stay flagged as
+    // `awaiting_user_input=true` and the engine would keep the session
+    // Sleeping while it is actually back at work.
+    if is_user_turn_entry(entry) || event_payload(entry, "turn_aborted").is_some() {
         *awaiting_user_input = false;
         *awaiting_user_text = None;
         return;
@@ -755,6 +771,31 @@ mod tests {
 
         let snapshot = parse(file.path(), &ExtractOptions::default()).expect("parse");
         assert!(!snapshot.awaiting_user_input);
+        assert!(snapshot.awaiting_user_text.is_none());
+    }
+
+    #[test]
+    fn parse_codex_clears_awaiting_user_on_markup_prefixed_user_reply() {
+        // Regression: a final_answer flips awaiting=true. The user then replies
+        // with a system-reminder-prefixed input (common harness shape — the
+        // user_task_text filter rejects strings starting with `<`). The
+        // structural user-turn check must still clear awaiting state because
+        // the user has, in fact, taken a turn and the agent is no longer idle.
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            concat!(
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Need approval to continue.\"}]}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"<system-reminder>continue working</system-reminder>\"}]}}\n"
+            ),
+        )
+        .expect("write fixture");
+
+        let snapshot = parse(file.path(), &ExtractOptions::default()).expect("parse");
+        assert!(
+            !snapshot.awaiting_user_input,
+            "user reply must clear awaiting state even when content is markup-prefixed"
+        );
         assert!(snapshot.awaiting_user_text.is_none());
     }
 

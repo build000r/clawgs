@@ -208,7 +208,7 @@ fn text_action(block: &Value, options: &ExtractOptions, ts: &Option<String>) -> 
         .get("text")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|text| text.len() > 5)
+        .filter(|text| text.chars().count() > 5)
         .map(|text| Action {
             tool: "said".to_string(),
             detail: Some(truncate(text, options.max_detail_chars)),
@@ -364,5 +364,32 @@ mod tests {
 
         assert_eq!(extract_user_text(Some(&assistant_message)), None);
         assert_eq!(extract_user_text(None), None);
+    }
+
+    #[test]
+    fn text_action_filters_short_replies_by_character_count() {
+        // The 5-char floor is meant to skip trivial chatter like "ok" or "yes".
+        // Byte-length would let "完成" (2 chars, 6 bytes) slip past while
+        // rejecting "Sorry" (5 chars, 5 bytes), which is inconsistent.
+        let options = ExtractOptions::default();
+        let ts = None;
+
+        let short_cjk = serde_json::json!({"type": "text", "text": "完成"});
+        assert!(
+            text_action(&short_cjk, &options, &ts).is_none(),
+            "2-char CJK reply must be filtered like a 2-char ASCII reply"
+        );
+
+        let medium_cjk = serde_json::json!({"type": "text", "text": "完成しました今日は"});
+        assert!(
+            text_action(&medium_cjk, &options, &ts).is_some(),
+            "9-char CJK reply must pass the >5 floor"
+        );
+
+        let short_ascii = serde_json::json!({"type": "text", "text": "Sorry"});
+        assert!(text_action(&short_ascii, &options, &ts).is_none());
+
+        let medium_ascii = serde_json::json!({"type": "text", "text": "Sorry, retrying"});
+        assert!(text_action(&medium_ascii, &options, &ts).is_some());
     }
 }

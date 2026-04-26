@@ -140,7 +140,7 @@ fn user_response_item_text(payload: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|role| *role == "user")
         .and_then(|_| extract_user_input_text(payload))
-        .filter(|text| text.len() < 1000 && !text.starts_with('<'))
+        .filter(|text| text.chars().count() < 1000 && !text.starts_with('<'))
 }
 
 fn user_event_message_text(payload: &Value) -> Option<String> {
@@ -439,6 +439,11 @@ fn observe_tool_call(
 ) {
     if observation.marks_edit {
         commit_signal.edited = true;
+        // A new edit invalidates any prior "validated" signal: the new bytes
+        // have not been tested yet, so commit_candidate must require fresh
+        // validation. Without this reset, edit -> test -> edit again would
+        // still report candidate=true and falsely cue a "ready to commit".
+        commit_signal.validated = false;
     }
 
     if observation.action.tool == "write_stdin" {
@@ -573,6 +578,7 @@ fn dirty_check_command(command: &str) -> bool {
     let trimmed = command.trim();
     trimmed == "git status"
         || trimmed.starts_with("git status ")
+        || trimmed == "git diff"
         || trimmed.starts_with("git diff ")
 }
 
@@ -649,7 +655,17 @@ fn xcodebuild_validation_command(normalized: &str) -> bool {
 }
 
 fn successful_command_output(output: &str) -> bool {
-    output.contains("Process exited with code 0")
+    // Codex tool outputs are framed:
+    //   <metadata lines incl. "Process exited with code N">
+    //   Output:
+    //   <stdout from the inner command>
+    // Match the exit line only inside the metadata header so command stdout
+    // that happens to print "Process exited with code 0" cannot forge a
+    // validation pass when the command actually failed.
+    let header = output.split("\nOutput:\n").next().unwrap_or(output);
+    header
+        .lines()
+        .any(|line| line.trim() == "Process exited with code 0")
 }
 
 fn running_session_id_from_output(output: &str) -> Option<String> {
@@ -924,6 +940,93 @@ mod tests {
                 commit_seen: false,
             })
         );
+    }
+
+    #[test]
+    fn parse_codex_second_edit_after_validation_clears_commit_candidate() {
+        // Realistic flow: dirty-check -> patch1 -> validate (passes) -> patch2
+        // (no re-validation). Without resetting `validated` on the second
+        // patch, candidate would still report true and falsely tell downstream
+        // tools the agent is ready to commit even though the new bytes are
+        // unvalidated.
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            concat!(
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Iterate on widget\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"git status --short\\\"}\",\"call_id\":\"call_status\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"status\":\"completed\",\"name\":\"apply_patch\",\"call_id\":\"call_patch1\",\"input\":\"*** Begin Patch\\n*** Update File: /tmp/project/src/widget.tsx\\n@@\\n-old\\n+new\\n*** End Patch\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"cargo test\\\"}\",\"call_id\":\"call_validate\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_validate\",\"output\":\"Chunk ID: abc\\nWall time: 0.01s\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\nok\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"status\":\"completed\",\"name\":\"apply_patch\",\"call_id\":\"call_patch2\",\"input\":\"*** Begin Patch\\n*** Update File: /tmp/project/src/widget.tsx\\n@@\\n-new\\n+newer\\n*** End Patch\\n\"}}\n"
+            ),
+        )
+        .expect("write fixture");
+
+        let snapshot = parse(file.path(), &ExtractOptions::default()).expect("parse");
+        let signal = snapshot.commit_signal.expect("commit_signal");
+
+        assert!(signal.edited, "second edit should still mark edited");
+        assert!(signal.dirty_checked, "git status earlier should still count");
+        assert!(
+            !signal.validated,
+            "second edit must invalidate the prior validation"
+        );
+        assert!(
+            !signal.candidate,
+            "candidate must be false until the new edit is re-validated"
+        );
+    }
+
+    #[test]
+    fn user_response_item_text_accepts_short_non_ascii_message_over_1000_bytes() {
+        // 400 multi-byte CJK chars = ~1200 bytes UTF-8 but < 1000 chars.
+        // The cap is meant to be character-based, so this should be accepted.
+        let text: String = "漢字".repeat(200); // 400 chars, ~1200 bytes
+        assert!(text.chars().count() < 1000);
+        assert!(text.len() > 1000);
+
+        let payload = serde_json::json!({
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": text}
+            ]
+        });
+
+        assert!(
+            user_response_item_text(&payload).is_some(),
+            "non-ASCII task text under the 1000-char cap must not be silently dropped"
+        );
+    }
+
+    #[test]
+    fn dirty_check_command_recognizes_bare_git_diff_and_status_variants() {
+        assert!(dirty_check_command("git status"));
+        assert!(dirty_check_command("git status --short"));
+        assert!(dirty_check_command("git diff"));
+        assert!(dirty_check_command("git diff --cached"));
+        assert!(dirty_check_command("git diff HEAD"));
+        assert!(dirty_check_command("  git diff  "));
+        assert!(!dirty_check_command("git diffstat"));
+        assert!(!dirty_check_command("git log"));
+    }
+
+    #[test]
+    fn successful_command_output_only_trusts_metadata_header() {
+        // Real success: metadata header has the exit line.
+        let real_success = "Chunk ID: abc\nWall time: 0.01s\nProcess exited with code 0\nOriginal token count: 12\nOutput:\n\nok\n";
+        assert!(successful_command_output(real_success));
+
+        // False positive guard: command stdout contains the literal exit line
+        // but the header reports a non-zero exit. Must not be treated as success.
+        let stdout_forgery = "Chunk ID: abc\nWall time: 0.01s\nProcess exited with code 1\nOriginal token count: 12\nOutput:\n\nlog: Process exited with code 0\n";
+        assert!(!successful_command_output(stdout_forgery));
+
+        // Header missing entirely (no Output: boundary): unchanged conservative
+        // behavior — stdout that mentions the line is not enough on its own
+        // outside the framed envelope.
+        let unframed = "Process exited with code 0 (in some random log)";
+        assert!(!successful_command_output(unframed));
     }
 
     #[test]

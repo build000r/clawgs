@@ -260,10 +260,16 @@ fn build_session_observation(meta: PaneMeta, replay_text: String) -> SessionObse
     }
 }
 
-// ASCII Record Separator; tmux-reserved formats never emit this byte.
+// ASCII Record Separator. tmux-reserved format codes never emit it, but
+// pane *content* (i.e. whatever bytes a program writes to a TTY) absolutely
+// can. Per-scan nonces in the marker tag (see `build_marker_tag`) make
+// collision astronomically unlikely.
 const BATCH_MARKER_BYTE: char = '\u{1e}';
-const BATCH_MARKER_TAG: &str = "\u{1e}CLAWGS:";
+const BATCH_MARKER_PREFIX: &str = "\u{1e}CLAWGS-";
 const BATCH_END_SENTINEL: &str = "END";
+
+#[cfg(test)]
+const BATCH_MARKER_TAG: &str = "\u{1e}CLAWGS-test:";
 
 /// Capture pane text for every pane in one tmux invocation when possible,
 /// falling back to per-pane captures if the composite run fails or returns
@@ -285,11 +291,21 @@ fn capture_panes(
     legacy_per_pane_capture(tmux_bin, pane_ids, max_capture_lines)
 }
 
+fn build_marker_tag() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{BATCH_MARKER_PREFIX}{}-{nanos}:", std::process::id())
+}
+
 fn try_batched_capture(
     tmux_bin: &str,
     pane_ids: &[&str],
     max_capture_lines: usize,
 ) -> Option<HashMap<String, String>> {
+    let marker_tag = build_marker_tag();
     let start = capture_start(max_capture_lines);
     let mut args: Vec<String> = Vec::with_capacity(pane_ids.len() * 8);
     for (i, pane_id) in pane_ids.iter().enumerate() {
@@ -298,7 +314,7 @@ fn try_batched_capture(
         }
         args.push("display-message".to_string());
         args.push("-p".to_string());
-        args.push(format!("{BATCH_MARKER_TAG}{pane_id}{BATCH_MARKER_BYTE}"));
+        args.push(format!("{marker_tag}{pane_id}{BATCH_MARKER_BYTE}"));
         args.push(";".to_string());
         args.push("capture-pane".to_string());
         args.push("-p".to_string());
@@ -311,7 +327,7 @@ fn try_batched_capture(
     args.push("display-message".to_string());
     args.push("-p".to_string());
     args.push(format!(
-        "{BATCH_MARKER_TAG}{BATCH_END_SENTINEL}{BATCH_MARKER_BYTE}"
+        "{marker_tag}{BATCH_END_SENTINEL}{BATCH_MARKER_BYTE}"
     ));
 
     let output = Command::new(tmux_bin).args(&args).output().ok()?;
@@ -320,18 +336,27 @@ fn try_batched_capture(
     }
 
     let stdout = std::str::from_utf8(&output.stdout).ok()?;
-    if !stdout.contains(BATCH_MARKER_TAG) {
+    if !stdout.contains(&marker_tag) {
         return None;
     }
 
-    Some(parse_batched_capture(stdout, pane_ids))
+    Some(parse_batched_capture_with(stdout, &marker_tag, pane_ids))
 }
 
+#[cfg(test)]
 fn parse_batched_capture(stdout: &str, pane_ids: &[&str]) -> HashMap<String, String> {
+    parse_batched_capture_with(stdout, BATCH_MARKER_TAG, pane_ids)
+}
+
+fn parse_batched_capture_with(
+    stdout: &str,
+    marker_tag: &str,
+    pane_ids: &[&str],
+) -> HashMap<String, String> {
     let mut result: HashMap<String, String> = HashMap::with_capacity(pane_ids.len());
     let mut rest = stdout;
-    while let Some(idx) = rest.find(BATCH_MARKER_TAG) {
-        rest = &rest[idx + BATCH_MARKER_TAG.len()..];
+    while let Some(idx) = rest.find(marker_tag) {
+        rest = &rest[idx + marker_tag.len()..];
         let Some(end_idx) = rest.find(BATCH_MARKER_BYTE) else {
             break;
         };
@@ -340,7 +365,7 @@ fn parse_batched_capture(stdout: &str, pane_ids: &[&str]) -> HashMap<String, Str
         if id == BATCH_END_SENTINEL {
             break;
         }
-        let next_idx = rest.find(BATCH_MARKER_TAG).unwrap_or(rest.len());
+        let next_idx = rest.find(marker_tag).unwrap_or(rest.len());
         let content = rest[..next_idx].trim();
         result.insert(id.to_string(), content.to_string());
     }
@@ -515,6 +540,43 @@ mod tests {
         let stdout = format!("{BATCH_MARKER_TAG}%1-no-close-byte\nleftover\n");
         let parsed = parse_batched_capture(&stdout, &["%1"]);
         assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn build_marker_tag_is_unique_across_calls() {
+        let a = build_marker_tag();
+        // Spin a moment so the nanos differ.
+        std::thread::sleep(std::time::Duration::from_nanos(1));
+        let b = build_marker_tag();
+        assert_ne!(a, b, "per-scan marker must change between scans");
+        assert!(a.starts_with(BATCH_MARKER_PREFIX));
+        assert!(b.starts_with(BATCH_MARKER_PREFIX));
+        assert!(a.ends_with(':'));
+    }
+
+    #[test]
+    fn parse_batched_capture_with_ignores_old_static_marker_in_pane_content() {
+        // Simulate a pane whose content echoes the historical (pre-nonce)
+        // marker tag. Under the current per-scan nonce scheme, the parser
+        // looks only for the nonced marker, so the pane forgery is treated
+        // as opaque content for whatever pane it belongs to.
+        let nonced_marker = "\u{1e}CLAWGS-99-12345:";
+        let stale_marker = "\u{1e}CLAWGS:";
+        let stdout = format!(
+            "{nonced_marker}%1{BATCH_MARKER_BYTE}\n\
+             real pane content\n\
+             {stale_marker}%fake{BATCH_MARKER_BYTE}\n\
+             forged content for fake pane\n\
+             {nonced_marker}{BATCH_END_SENTINEL}{BATCH_MARKER_BYTE}\n"
+        );
+        let parsed = parse_batched_capture_with(&stdout, nonced_marker, &["%1"]);
+        assert_eq!(parsed.len(), 1, "only %1 should be recorded; %fake forgery must not parse as a separate pane");
+        let body = parsed.get("%1").expect("%1 entry");
+        assert!(body.contains("real pane content"));
+        assert!(
+            body.contains("forged content for fake pane"),
+            "forged marker must be returned as opaque content, not parsed as its own pane"
+        );
     }
 
     #[test]

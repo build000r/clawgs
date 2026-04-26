@@ -594,9 +594,13 @@ fn should_scan_tmux(
 }
 
 fn tmux_socket_timeout(next_reconcile_at: Instant) -> Duration {
+    // UnixDatagram::set_read_timeout rejects Some(Duration::ZERO) with
+    // InvalidInput, so clamp the low end to 1ms. If the deadline has already
+    // passed, a 1ms wait is enough for should_scan_tmux's timeout branch to
+    // trip its `Instant::now() >= next_reconcile_at` check and force a scan.
     next_reconcile_at
         .saturating_duration_since(Instant::now())
-        .min(Duration::from_millis(1_000))
+        .clamp(Duration::from_millis(1), Duration::from_millis(1_000))
 }
 
 fn is_tmux_retryable_error(error: &io::Error) -> bool {
@@ -724,6 +728,21 @@ mod tests {
         assert!(socket_path.exists());
         drop(guard);
         assert!(!socket_path.exists());
+    }
+
+    #[test]
+    fn tmux_socket_timeout_never_returns_zero_duration() {
+        let past = Instant::now() - Duration::from_secs(5);
+        assert!(
+            tmux_socket_timeout(past) >= Duration::from_millis(1),
+            "past deadlines must not produce a zero timeout (set_read_timeout rejects it)"
+        );
+
+        let future = Instant::now() + Duration::from_secs(30);
+        assert!(
+            tmux_socket_timeout(future) <= Duration::from_millis(1_000),
+            "future deadlines are capped to the reconcile poll ceiling"
+        );
     }
 
     #[test]

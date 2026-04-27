@@ -1,3 +1,9 @@
+// The emit engine is a state machine whose small helper functions pass the
+// current session, runtime state, request config, and output buffers together.
+// Grouping these into broad mutable context structs makes ownership less clear
+// than the explicit arguments, so keep the signatures explicit.
+#![allow(clippy::too_many_arguments)]
+
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -5,7 +11,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
 use crate::{
-    discover_claude_paths, discover_codex_paths, extract, resolve_input, AgentTool,
+    discover_claude_paths, discover_codex_paths, extract, resolve_input, Action, AgentTool,
     ExtractOptions, Snapshot, ToolSelection,
 };
 
@@ -18,6 +24,7 @@ use super::protocol::{
     ThoughtState, ThoughtUpdate, TimingInfo,
 };
 
+const SUMMARY_HISTORY_CAP: usize = 10;
 const TERMINAL_CONTEXT_CHARS: usize = 800;
 const TERMINAL_MIN_MEANINGFUL_DELTA_CHARS: usize = 100;
 const MAX_THOUGHT_CHARS: usize = 120;
@@ -63,7 +70,10 @@ impl SessionRuntimeState {
             run_finished_at: initial_run_finished_at(session, now),
             last_emitted_thought: session.thought.clone(),
             sleeping_emitted: session.thought_state == ThoughtState::Sleeping
-                && matches!(session.rest_state, RestState::Sleeping | RestState::DeepSleep),
+                && matches!(
+                    session.rest_state,
+                    RestState::Sleeping | RestState::DeepSleep
+                ),
             thought_state: session.thought_state,
             thought_source: session.thought_source,
             rest_state: session.rest_state,
@@ -100,13 +110,24 @@ impl SessionRuntimeState {
         }
     }
 
+    fn should_call_for_cadence(&self, config: &ThoughtConfig, now: DateTime<Utc>) -> bool {
+        match self.last_call_at {
+            Some(last_call) => {
+                let elapsed_ms = (now - last_call).num_milliseconds();
+                elapsed_ms >= self.cadence_for_state(config, now) as i64
+            }
+            None => true,
+        }
+    }
 }
 
 struct PreparedSessionContext {
+    context_snapshot: Option<Snapshot>,
     context_source: ContextSource,
     next_rest_state: RestState,
     next_commit_candidate: bool,
     objective_fingerprint: String,
+    objective_changed: bool,
 }
 
 pub struct EmitEngine {
@@ -291,7 +312,7 @@ impl EmitEngine {
 }
 
 fn process_session(
-    _model_client: &dyn ModelClient,
+    model_client: &dyn ModelClient,
     stream_instance_id: &str,
     per_session: &mut HashMap<String, SessionRuntimeState>,
     request: &SyncRequest,
@@ -351,7 +372,7 @@ fn process_session(
         return;
     }
 
-    if wake_from_sleep_if_needed(
+    let woke_from_sleep = wake_from_sleep_if_needed(
         stream_instance_id,
         state,
         session,
@@ -361,9 +382,7 @@ fn process_session(
         next_rest_state,
         next_commit_candidate,
         updates,
-    ) {
-        return;
-    }
+    );
 
     let Some(prepared) = prepare_session_context(
         state,
@@ -378,36 +397,34 @@ fn process_session(
         return;
     };
 
-    if clear_non_sleeping_thought_if_needed(
+    if suppress_for_cadence_or_terminal_delta(
         stream_instance_id,
         state,
         session,
+        prepared.context_snapshot.as_ref(),
         &request.config,
         prepared.context_source,
+        prepared.objective_changed,
+        woke_from_sleep,
         request.now,
         prepared.next_rest_state,
         prepared.next_commit_candidate,
-        Some(prepared.objective_fingerprint.clone()),
         updates,
+        metrics,
     ) {
         return;
     }
 
-    if emit_passive_state_change_if_needed(
-        updates,
+    emit_session_thought(
+        model_client,
         stream_instance_id,
         state,
+        request,
         session,
-        &request.config,
-        prepared.context_source,
-        prepared.next_rest_state,
-        prepared.next_commit_candidate,
-        request.now,
-    ) {
-        return;
-    }
-
-    metrics.suppressed += 1;
+        &prepared,
+        updates,
+        metrics,
+    );
 }
 
 fn wake_from_sleep_if_needed(
@@ -464,13 +481,15 @@ fn prepare_session_context(
 
     let objective_fingerprint =
         objective_fingerprint_for_session(context_snapshot.as_ref(), session);
-    update_objective_fingerprint(state, &objective_fingerprint, now);
+    let objective_changed = update_objective_fingerprint(state, &objective_fingerprint, now);
 
     Some(PreparedSessionContext {
+        context_snapshot,
         context_source,
         next_rest_state,
         next_commit_candidate,
         objective_fingerprint,
+        objective_changed,
     })
 }
 
@@ -491,6 +510,199 @@ fn objective_fingerprint_for_session(
     context_snapshot
         .map(|snapshot| context_focus_fingerprint(snapshot, &session.state).to_string())
         .unwrap_or_else(|| terminal_objective_fingerprint(&session.replay_text, &session.state))
+}
+
+fn emit_session_thought(
+    model_client: &dyn ModelClient,
+    stream_instance_id: &str,
+    state: &mut SessionRuntimeState,
+    request: &SyncRequest,
+    session: &SessionSnapshot,
+    prepared: &PreparedSessionContext,
+    updates: &mut Vec<ThoughtUpdate>,
+    metrics: &mut SyncMetrics,
+) {
+    state.last_call_at = Some(request.now);
+    let prompt = prompt_for_session(prepared.context_snapshot.as_ref(), session, state, request);
+    let Some(raw_thought) =
+        complete_session_thought(model_client, &prompt, request, session, state, metrics)
+    else {
+        return;
+    };
+
+    let thought = sanitize_thought_text(&raw_thought);
+    if thought.is_empty() {
+        metrics.suppressed += 1;
+        return;
+    }
+
+    if handle_duplicate_generated_thought(
+        &thought,
+        updates,
+        stream_instance_id,
+        state,
+        session,
+        &request.config,
+        prepared.context_source,
+        prepared.next_rest_state,
+        prepared.next_commit_candidate,
+        request.now,
+        metrics,
+    ) {
+        return;
+    }
+
+    publish_generated_thought(
+        stream_instance_id,
+        state,
+        session,
+        &request.config,
+        &thought,
+        prepared,
+        request.now,
+        updates,
+        metrics,
+    );
+}
+
+fn prompt_for_session(
+    context_snapshot: Option<&Snapshot>,
+    session: &SessionSnapshot,
+    state: &SessionRuntimeState,
+    request: &SyncRequest,
+) -> String {
+    context_snapshot
+        .map(|snapshot| {
+            build_context_prompt(
+                snapshot,
+                &session.state,
+                &state.summary_history,
+                request.config.agent_prompt.as_deref(),
+            )
+        })
+        .unwrap_or_else(|| {
+            build_terminal_prompt(
+                &session.replay_text,
+                &session.state,
+                state.last_terminal_context.as_deref(),
+                request.config.terminal_prompt.as_deref(),
+            )
+        })
+}
+
+fn complete_session_thought(
+    model_client: &dyn ModelClient,
+    prompt: &str,
+    request: &SyncRequest,
+    session: &SessionSnapshot,
+    state: &mut SessionRuntimeState,
+    metrics: &mut SyncMetrics,
+) -> Option<String> {
+    match model_client.complete(prompt, request.config.model_override()) {
+        Ok(value) => Some(value),
+        Err(err) => {
+            metrics.suppressed += 1;
+            if metrics.last_backend_error.is_none() {
+                metrics.last_backend_error = Some(err);
+            }
+            state.last_terminal_context = Some(trim_terminal_context(&session.replay_text));
+            None
+        }
+    }
+}
+
+fn handle_duplicate_generated_thought(
+    thought: &str,
+    updates: &mut Vec<ThoughtUpdate>,
+    stream_instance_id: &str,
+    state: &mut SessionRuntimeState,
+    session: &SessionSnapshot,
+    config: &ThoughtConfig,
+    context_source: ContextSource,
+    next_rest_state: RestState,
+    next_commit_candidate: bool,
+    now: DateTime<Utc>,
+    metrics: &mut SyncMetrics,
+) -> bool {
+    if !is_duplicate_thought(state.last_emitted_thought.as_deref(), thought) {
+        return false;
+    }
+
+    if emit_passive_state_change_if_needed(
+        updates,
+        stream_instance_id,
+        state,
+        session,
+        config,
+        context_source,
+        next_rest_state,
+        next_commit_candidate,
+        now,
+    ) {
+        return true;
+    }
+    metrics.suppressed += 1;
+    true
+}
+
+fn publish_generated_thought(
+    stream_instance_id: &str,
+    state: &mut SessionRuntimeState,
+    session: &SessionSnapshot,
+    config: &ThoughtConfig,
+    thought: &str,
+    prepared: &PreparedSessionContext,
+    now: DateTime<Utc>,
+    updates: &mut Vec<ThoughtUpdate>,
+    metrics: &mut SyncMetrics,
+) {
+    let next_state = next_thought_state(prepared.objective_changed);
+    let token_count = token_count_for_context(prepared.context_snapshot.as_ref(), session);
+    updates.push(thought_update(
+        stream_instance_id,
+        state,
+        session,
+        Some(thought.to_string()),
+        token_count,
+        session.context_limit,
+        next_state,
+        ThoughtSource::Llm,
+        prepared.objective_changed,
+        now,
+        Some(prepared.objective_fingerprint.clone()),
+        prepared.next_rest_state,
+        prepared.next_commit_candidate,
+        config,
+        prepared.context_source,
+    ));
+
+    state.last_emitted_thought = Some(thought.to_string());
+    state.summary_history.push(thought.to_string());
+    if state.summary_history.len() > SUMMARY_HISTORY_CAP {
+        let start = state.summary_history.len() - SUMMARY_HISTORY_CAP;
+        state.summary_history = state.summary_history.split_off(start);
+    }
+    state.thought_state = next_state;
+    state.thought_source = ThoughtSource::Llm;
+    state.rest_state = prepared.next_rest_state;
+    state.commit_candidate = prepared.next_commit_candidate;
+    state.sleeping_emitted = false;
+    state.last_terminal_context = Some(trim_terminal_context(&session.replay_text));
+    metrics.llm_calls += 1;
+}
+
+fn next_thought_state(objective_changed: bool) -> ThoughtState {
+    if objective_changed {
+        ThoughtState::Active
+    } else {
+        ThoughtState::Holding
+    }
+}
+
+fn token_count_for_context(context_snapshot: Option<&Snapshot>, session: &SessionSnapshot) -> u64 {
+    context_snapshot
+        .map(|snapshot| snapshot.token_count)
+        .unwrap_or(session.token_count)
 }
 
 fn handle_sleeping_session(
@@ -661,47 +873,6 @@ fn current_thought_for_update(
         .or_else(|| session.thought.clone())
 }
 
-fn clear_non_sleeping_thought_if_needed(
-    stream_instance_id: &str,
-    state: &mut SessionRuntimeState,
-    session: &SessionSnapshot,
-    config: &ThoughtConfig,
-    context_source: ContextSource,
-    now: DateTime<Utc>,
-    next_rest_state: RestState,
-    next_commit_candidate: bool,
-    objective_fingerprint: Option<String>,
-    updates: &mut Vec<ThoughtUpdate>,
-) -> bool {
-    if state.thought_state == ThoughtState::Sleeping
-        || current_thought_for_update(state, session).is_none()
-    {
-        return false;
-    }
-
-    updates.push(clear_thought_update(
-        stream_instance_id,
-        state,
-        session,
-        config,
-        context_source,
-        now,
-        next_rest_state,
-        next_commit_candidate,
-        objective_fingerprint,
-    ));
-    state.last_call_at = None;
-    state.last_emitted_thought = None;
-    state.summary_history.clear();
-    state.thought_state = ThoughtState::Holding;
-    state.thought_source = ThoughtSource::CarryForward;
-    state.rest_state = next_rest_state;
-    state.commit_candidate = next_commit_candidate;
-    state.sleeping_emitted = false;
-    state.last_terminal_context = Some(trim_terminal_context(&session.replay_text));
-    true
-}
-
 fn sleeping_thought_for_update(
     state: &SessionRuntimeState,
     session: &SessionSnapshot,
@@ -785,6 +956,116 @@ fn idle_rest_state(idle_ms: i64) -> RestState {
 
 fn is_sleeping_rest_state(rest_state: RestState) -> bool {
     matches!(rest_state, RestState::Sleeping | RestState::DeepSleep)
+}
+
+fn should_suppress_for_cadence(
+    state: &SessionRuntimeState,
+    config: &ThoughtConfig,
+    objective_changed: bool,
+    woke_from_sleep: bool,
+    now: DateTime<Utc>,
+) -> bool {
+    !objective_changed && !woke_from_sleep && !state.should_call_for_cadence(config, now)
+}
+
+fn should_suppress_for_terminal_delta(
+    session: &SessionSnapshot,
+    state: &SessionRuntimeState,
+    context_snapshot: Option<&Snapshot>,
+    objective_changed: bool,
+    woke_from_sleep: bool,
+) -> bool {
+    context_snapshot.is_none()
+        && !objective_changed
+        && !woke_from_sleep
+        && !has_meaningful_terminal_delta(
+            &session.replay_text,
+            state.last_terminal_context.as_deref(),
+        )
+}
+
+fn suppress_for_cadence_or_terminal_delta(
+    stream_instance_id: &str,
+    state: &mut SessionRuntimeState,
+    session: &SessionSnapshot,
+    context_snapshot: Option<&Snapshot>,
+    config: &ThoughtConfig,
+    context_source: ContextSource,
+    objective_changed: bool,
+    woke_from_sleep: bool,
+    now: DateTime<Utc>,
+    next_rest_state: RestState,
+    next_commit_candidate: bool,
+    updates: &mut Vec<ThoughtUpdate>,
+    metrics: &mut SyncMetrics,
+) -> bool {
+    if should_suppress_for_cadence(state, config, objective_changed, woke_from_sleep, now) {
+        return suppress_with_passive_state_change(
+            updates,
+            stream_instance_id,
+            state,
+            session,
+            config,
+            context_source,
+            next_rest_state,
+            next_commit_candidate,
+            now,
+            metrics,
+        );
+    }
+
+    if should_suppress_for_terminal_delta(
+        session,
+        state,
+        context_snapshot,
+        objective_changed,
+        woke_from_sleep,
+    ) {
+        return suppress_with_passive_state_change(
+            updates,
+            stream_instance_id,
+            state,
+            session,
+            config,
+            context_source,
+            next_rest_state,
+            next_commit_candidate,
+            now,
+            metrics,
+        );
+    }
+
+    false
+}
+
+fn suppress_with_passive_state_change(
+    updates: &mut Vec<ThoughtUpdate>,
+    stream_instance_id: &str,
+    state: &mut SessionRuntimeState,
+    session: &SessionSnapshot,
+    config: &ThoughtConfig,
+    context_source: ContextSource,
+    next_rest_state: RestState,
+    next_commit_candidate: bool,
+    now: DateTime<Utc>,
+    metrics: &mut SyncMetrics,
+) -> bool {
+    if emit_passive_state_change_if_needed(
+        updates,
+        stream_instance_id,
+        state,
+        session,
+        config,
+        context_source,
+        next_rest_state,
+        next_commit_candidate,
+        now,
+    ) {
+        true
+    } else {
+        metrics.suppressed += 1;
+        true
+    }
 }
 
 fn context_source_for_snapshot(context_snapshot: Option<&Snapshot>) -> ContextSource {
@@ -1003,6 +1284,142 @@ fn tool_selection_for_session(tool: Option<&str>) -> Option<ToolSelection> {
     }
 }
 
+fn build_context_prompt(
+    snapshot: &Snapshot,
+    state: &SessionState,
+    summary_history: &[String],
+    custom_preamble: Option<&str>,
+) -> String {
+    let mut parts = vec![
+        custom_preamble
+            .unwrap_or(DEFAULT_AGENT_PREAMBLE)
+            .to_string(),
+        format!("State: {}", state_label(state)),
+    ];
+    parts.extend(task_lines(snapshot.user_task.as_deref()));
+    parts.extend(summary_history_lines(summary_history));
+    parts.extend(action_lines(&snapshot.recent_actions));
+    parts.extend(current_tool_lines(snapshot.current_tool.as_ref()));
+    parts.extend(context_prompt_tail());
+    parts.join("\n")
+}
+
+fn task_lines(task: Option<&str>) -> Vec<String> {
+    task.map(|task| vec![format!("Task: {task}")])
+        .unwrap_or_default()
+}
+
+fn summary_history_lines(summary_history: &[String]) -> Vec<String> {
+    if summary_history.is_empty() {
+        return Vec::new();
+    }
+
+    let mut lines = vec!["Recent status:".to_string()];
+    lines.extend(
+        summary_history
+            .iter()
+            .rev()
+            .take(3)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|status| format!("  {status}")),
+    );
+    lines
+}
+
+fn action_lines(actions: &[Action]) -> Vec<String> {
+    if actions.is_empty() {
+        return Vec::new();
+    }
+
+    let mut lines = vec!["Actions:".to_string()];
+    lines.extend(actions.iter().map(format_action_line));
+    lines
+}
+
+fn format_action_line(action: &Action) -> String {
+    if action.tool == "said" {
+        format!("  said: {}", action.detail.as_deref().unwrap_or_default())
+    } else {
+        format!(
+            "  {}{}",
+            action.tool,
+            detail_suffix(action.detail.as_deref())
+        )
+    }
+}
+
+fn current_tool_lines(action: Option<&Action>) -> Vec<String> {
+    action
+        .map(|action| {
+            vec![format!(
+                "Now: {}{}",
+                action.tool,
+                detail_suffix(action.detail.as_deref())
+            )]
+        })
+        .unwrap_or_default()
+}
+
+fn detail_suffix(detail: Option<&str>) -> String {
+    detail.map(|value| format!(": {value}")).unwrap_or_default()
+}
+
+fn context_prompt_tail() -> Vec<String> {
+    vec![
+        String::new(),
+        "Write a 1-line status (max 60 chars). Explain the PURPOSE and WHY, not the tool or command.".to_string(),
+        "Do not speculate about anticipated future steps.".to_string(),
+        "Reply with ONLY the status line, nothing else.".to_string(),
+    ]
+}
+
+fn build_terminal_prompt(
+    context: &str,
+    state: &SessionState,
+    prev_context: Option<&str>,
+    custom_preamble: Option<&str>,
+) -> String {
+    let preamble = custom_preamble.unwrap_or(DEFAULT_TERMINAL_PREAMBLE);
+    let clean = trim_terminal_context(context);
+    let clean_prev = prev_context.map(trim_terminal_context);
+
+    let context_block = if let Some(prev) = clean_prev {
+        let tail: String = prev
+            .chars()
+            .rev()
+            .take(200)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        match clean.find(&tail) {
+            Some(index) => {
+                let delta = clean[index + tail.len()..].trim();
+                if delta.is_empty() {
+                    format!("Screen:\n{clean}")
+                } else {
+                    format!("New output:\n{delta}")
+                }
+            }
+            None => format!("Screen:\n{clean}"),
+        }
+    } else {
+        format!("Screen:\n{clean}")
+    };
+
+    format!(
+        "{preamble}\n\
+         State: {}\n\
+         {context_block}\n\n\
+         Write a 1-line status (max 60 chars). Infer the PURPOSE behind what's on screen - WHY is this happening, not WHAT command is running.\n\
+         Do not speculate about anticipated future steps.\n\
+         Reply with ONLY the status line, nothing else.",
+        state_label(state)
+    )
+}
+
 fn state_label(state: &SessionState) -> &'static str {
     match state {
         SessionState::Idle => "idle",
@@ -1108,6 +1525,21 @@ fn sanitize_thought_text(raw: &str) -> String {
     trimmed
 }
 
+fn is_duplicate_thought(previous: Option<&str>, next: &str) -> bool {
+    let Some(previous) = previous else {
+        return false;
+    };
+    normalize_for_compare(previous) == normalize_for_compare(next)
+}
+
+fn normalize_for_compare(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
 fn trim_terminal_context(context: &str) -> String {
     let stripped = strip_ansi(context);
     // Walk char_indices from the back to find the byte offset that yields
@@ -1154,7 +1586,7 @@ fn skip_escape_sequence(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
 
 fn skip_csi_sequence(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
     chars.next();
-    while let Some(next) = chars.next() {
+    for next in chars.by_ref() {
         if next.is_ascii_alphabetic() || next == '~' {
             break;
         }
@@ -1364,7 +1796,7 @@ mod tests {
     }
 
     #[test]
-    fn suppresses_thought_for_active_session() {
+    fn emits_thought_for_eligible_active_session() {
         let now = Utc::now();
         let mut engine = mock_engine("investigating failing auth tests");
 
@@ -1377,10 +1809,14 @@ mod tests {
 
         let result = engine.sync(&request);
         assert_eq!(result.msg_type, "sync_result");
-        assert!(result.updates.is_empty());
+        assert_eq!(result.updates.len(), 1);
+        assert_eq!(
+            result.updates[0].thought.as_deref(),
+            Some("investigating failing auth tests")
+        );
+        assert_eq!(result.updates[0].thought_source, ThoughtSource::Llm);
         assert!(!result.stream_instance_id.is_empty());
-        assert_eq!(result.metrics.llm_calls, 0);
-        assert!(result.metrics.suppressed > 0);
+        assert_eq!(result.metrics.llm_calls, 1);
     }
 
     #[test]
@@ -1395,8 +1831,8 @@ mod tests {
             sessions: vec![sample_session(now)],
         };
         let first_result = engine.sync(&first);
-        assert!(first_result.updates.is_empty());
-        assert_eq!(first_result.metrics.llm_calls, 0);
+        assert_eq!(first_result.updates.len(), 1);
+        assert_eq!(first_result.metrics.llm_calls, 1);
 
         let second = SyncRequest {
             id: "req-2".to_string(),
@@ -1411,7 +1847,7 @@ mod tests {
     }
 
     #[test]
-    fn active_sessions_do_not_require_model_completion() {
+    fn model_completion_failure_suppresses_update_and_reports_error() {
         let now = Utc::now();
         let mut engine = failing_engine("codex exec failed: not authenticated");
 
@@ -1425,7 +1861,10 @@ mod tests {
         let result = engine.sync(&request);
         assert!(result.updates.is_empty());
         assert_eq!(result.metrics.llm_calls, 0);
-        assert!(result.metrics.last_backend_error.is_none());
+        assert_eq!(
+            result.metrics.last_backend_error.as_deref(),
+            Some("codex exec failed: not authenticated")
+        );
         assert!(result.metrics.suppressed > 0);
     }
 
@@ -1436,16 +1875,28 @@ mod tests {
         session.state = SessionState::Idle;
 
         session.last_activity_at = now - Duration::milliseconds(9_999);
-        assert_eq!(rest_state_for_session(&session, None, now), RestState::Active);
+        assert_eq!(
+            rest_state_for_session(&session, None, now),
+            RestState::Active
+        );
 
         session.last_activity_at = now - Duration::milliseconds(10_000);
-        assert_eq!(rest_state_for_session(&session, None, now), RestState::Drowsy);
+        assert_eq!(
+            rest_state_for_session(&session, None, now),
+            RestState::Drowsy
+        );
 
         session.last_activity_at = now - Duration::milliseconds(30_000);
-        assert_eq!(rest_state_for_session(&session, None, now), RestState::Drowsy);
+        assert_eq!(
+            rest_state_for_session(&session, None, now),
+            RestState::Drowsy
+        );
 
         session.last_activity_at = now - Duration::milliseconds(60_000);
-        assert_eq!(rest_state_for_session(&session, None, now), RestState::Drowsy);
+        assert_eq!(
+            rest_state_for_session(&session, None, now),
+            RestState::Drowsy
+        );
     }
 
     #[test]
@@ -1562,8 +2013,10 @@ mod tests {
         session.thought = Some("existing thought".to_string());
         session.thought_state = ThoughtState::Active;
 
-        let mut config = ThoughtConfig::default();
-        config.enabled = false;
+        let config = ThoughtConfig {
+            enabled: false,
+            ..ThoughtConfig::default()
+        };
 
         let request = SyncRequest {
             id: "req-1".to_string(),
@@ -1595,7 +2048,8 @@ mod tests {
             config: ThoughtConfig::default(),
             sessions: vec![session.clone()],
         });
-        assert!(first.updates.is_empty());
+        assert_eq!(first.updates.len(), 1);
+        assert_eq!(first.metrics.llm_calls, 1);
 
         engine
             .per_session
@@ -1627,9 +2081,12 @@ mod tests {
             sessions: vec![session],
         });
         assert_eq!(second.updates.len(), 1);
-        assert!(second.updates[0].thought.is_none());
+        assert_eq!(
+            second.updates[0].thought.as_deref(),
+            Some("stabilizing preview widget behavior")
+        );
         assert!(second.updates[0].commit_candidate);
-        assert_eq!(second.updates[0].emission_seq, Some(1));
+        assert_eq!(second.updates[0].emission_seq, Some(2));
     }
 
     #[test]
@@ -1759,7 +2216,7 @@ mod tests {
             config: ThoughtConfig::default(),
             sessions: vec![sample_session(now)],
         });
-        assert!(active.updates.is_empty());
+        assert_eq!(active.updates.len(), 1);
 
         let sleeping_at = now + Duration::seconds(31);
         let state = engine
@@ -1782,7 +2239,7 @@ mod tests {
             sessions: vec![waking],
         });
 
-        assert_eq!(waking_result.updates.len(), 1);
+        assert_eq!(waking_result.updates.len(), 2);
         let clear_timing = waking_result.updates[0]
             .timing
             .as_ref()
@@ -1795,6 +2252,10 @@ mod tests {
         assert_eq!(clear_cues.cadence_tier, CadenceTier::Hot);
         assert_eq!(clear_cues.next_llm_eligible_at, waking_now);
         assert!(waking_result.updates[0].thought.is_none());
+        assert_eq!(
+            waking_result.updates[1].thought.as_deref(),
+            Some("working through auth fallback")
+        );
     }
 
     #[test]
@@ -1854,7 +2315,8 @@ mod tests {
             sessions: vec![session],
         });
 
-        assert!(result.updates.is_empty());
+        assert_eq!(result.updates.len(), 1);
+        assert_eq!(result.metrics.llm_calls, 1);
         let state = engine
             .per_session
             .get("tmux:work:1.0:%1")
@@ -1959,7 +2421,7 @@ mod tests {
     }
 
     #[test]
-    fn meaningful_terminal_output_stays_quiet_without_sleep() {
+    fn meaningful_terminal_output_emits_thought() {
         let now = Utc::now();
         let mut engine = mock_engine("isolating auth regression");
         let mut bootstrap = sample_session(now);
@@ -1980,8 +2442,12 @@ mod tests {
             sessions: vec![sample_session(now + Duration::seconds(1))],
         });
 
-        assert!(second.updates.is_empty());
-        assert_eq!(second.metrics.llm_calls, 0);
+        assert_eq!(second.updates.len(), 1);
+        assert_eq!(
+            second.updates[0].thought.as_deref(),
+            Some("isolating auth regression")
+        );
+        assert_eq!(second.metrics.llm_calls, 1);
     }
 
     #[test]
@@ -1997,7 +2463,7 @@ mod tests {
             config: ThoughtConfig::default(),
             sessions: vec![first_session],
         });
-        assert!(first.updates.is_empty());
+        assert_eq!(first.updates.len(), 1);
 
         let mut second_session = sample_session(now + Duration::seconds(20));
         second_session.state = SessionState::Attention;
@@ -2011,9 +2477,12 @@ mod tests {
         });
 
         assert_eq!(second.updates.len(), 1);
-        assert!(second.updates[0].thought.is_none());
+        assert_eq!(
+            second.updates[0].thought.as_deref(),
+            Some("reviewing auth fallback")
+        );
         assert_eq!(second.updates[0].rest_state, RestState::Drowsy);
-        assert_eq!(second.updates[0].thought_state, ThoughtState::Holding);
+        assert_eq!(second.updates[0].thought_state, ThoughtState::Active);
     }
 
     #[test]
@@ -2065,7 +2534,11 @@ mod tests {
             sessions: vec![session],
         });
 
-        assert!(result.updates.is_empty());
+        assert_eq!(result.updates.len(), 1);
+        assert_eq!(
+            result.updates[0].thought.as_deref(),
+            Some("fixing auth regression")
+        );
         assert_eq!(
             engine
                 .per_session

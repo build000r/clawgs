@@ -28,59 +28,39 @@ pub enum SessionState {
     Exited,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ThoughtState {
     Active,
+    #[default]
     Holding,
     Sleeping,
 }
 
-impl Default for ThoughtState {
-    fn default() -> Self {
-        Self::Holding
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ThoughtSource {
+    #[default]
     CarryForward,
     Llm,
     StaticSleeping,
 }
 
-impl Default for ThoughtSource {
-    fn default() -> Self {
-        Self::CarryForward
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RestState {
+    #[default]
     Active,
     Drowsy,
     Sleeping,
     DeepSleep,
 }
 
-impl Default for RestState {
-    fn default() -> Self {
-        Self::Active
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BubblePrecedence {
+    #[default]
     ThoughtFirst,
-}
-
-impl Default for BubblePrecedence {
-    fn default() -> Self {
-        Self::ThoughtFirst
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -478,6 +458,12 @@ impl HelloMessage {
     }
 }
 
+impl Default for HelloMessage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct SyncResultMessage {
     #[serde(rename = "type")]
@@ -726,13 +712,18 @@ mod tests {
         };
 
         cfg.normalize();
-        assert_eq!(cfg.agent_prompt.as_deref(), Some("you are a status reporter"));
+        assert_eq!(
+            cfg.agent_prompt.as_deref(),
+            Some("you are a status reporter")
+        );
     }
 
     #[test]
     fn hot_cadence_must_be_in_range() {
-        let mut cfg = ThoughtConfig::default();
-        cfg.cadence_hot_ms = CADENCE_HOT_MIN_MS - 1;
+        let cfg = ThoughtConfig {
+            cadence_hot_ms: CADENCE_HOT_MIN_MS - 1,
+            ..ThoughtConfig::default()
+        };
 
         let err = cfg
             .validate()
@@ -742,9 +733,11 @@ mod tests {
 
     #[test]
     fn warm_cadence_must_be_at_least_hot() {
-        let mut cfg = ThoughtConfig::default();
-        cfg.cadence_hot_ms = 10_000;
-        cfg.cadence_warm_ms = 9_999;
+        let cfg = ThoughtConfig {
+            cadence_hot_ms: 10_000,
+            cadence_warm_ms: 9_999,
+            ..ThoughtConfig::default()
+        };
 
         let err = cfg
             .validate()
@@ -754,9 +747,11 @@ mod tests {
 
     #[test]
     fn cold_cadence_must_be_at_least_warm() {
-        let mut cfg = ThoughtConfig::default();
-        cfg.cadence_warm_ms = 50_000;
-        cfg.cadence_cold_ms = 49_000;
+        let cfg = ThoughtConfig {
+            cadence_warm_ms: 50_000,
+            cadence_cold_ms: 49_000,
+            ..ThoughtConfig::default()
+        };
 
         let err = cfg
             .validate()

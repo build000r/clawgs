@@ -473,6 +473,10 @@ fn run_tmux_emit(args: TmuxEmitArgs) -> Result<()> {
     )
 }
 
+// Loop wiring needs the output, engine, tracker, scan settings, config, and
+// notify socket as independently-owned values. Keeping them explicit avoids a
+// broad mutable context type for one call site and its focused test.
+#[allow(clippy::too_many_arguments)]
 fn run_tmux_emit_loop<W: Write>(
     stdout: &mut W,
     engine: &mut EmitEngine,
@@ -508,8 +512,8 @@ fn tmux_emit_config(args: &TmuxEmitArgs) -> Result<clawgs::emit::protocol::Thoug
         config.model = args.model.clone();
     }
 
-    config
-        .validate()
+    config = config
+        .normalize_and_validate()
         .map_err(|error| anyhow::anyhow!("invalid tmux emit config: {error}"))?;
     Ok(config)
 }

@@ -53,25 +53,29 @@ fn entry_type(entry: &Value) -> &str {
         .unwrap_or_default()
 }
 
-fn message<'a>(entry: &'a Value) -> Option<&'a Value> {
+fn message(entry: &Value) -> Option<&Value> {
     entry.get("message")
 }
 
 fn update_user_task(entry: &Value, options: &ExtractOptions, user_task: &mut Option<String>) {
-    (entry_type(entry) == "user")
+    if let Some(text) = (entry_type(entry) == "user")
         .then_some(message(entry))
         .flatten()
         .and_then(|message| extract_user_text(Some(message)))
         .map(|text| truncate(&text, options.max_task_chars))
-        .map(|text| *user_task = Some(text));
+    {
+        *user_task = Some(text);
+    }
 }
 
 fn update_token_count(entry: &Value, token_count: &mut u64) {
-    assistant_message(entry)
+    if let Some(value) = assistant_message(entry)
         .and_then(|message| message.get("usage"))
         .and_then(|usage| usage.get("input_tokens"))
         .and_then(Value::as_u64)
-        .map(|value| *token_count = value);
+    {
+        *token_count = value;
+    }
 }
 
 fn update_awaiting_user_state(
@@ -302,9 +306,7 @@ mod tests {
         let file = NamedTempFile::new().expect("temp file");
         fs::write(
             file.path(),
-            concat!(
-                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"Which option do you want?\"}]}}\n"
-            ),
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"Which option do you want?\"}]}}\n",
         )
         .expect("write fixture");
 
@@ -321,9 +323,7 @@ mod tests {
         let file = NamedTempFile::new().expect("temp file");
         fs::write(
             file.path(),
-            concat!(
-                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"pwd\"}}]}}\n"
-            ),
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"pwd\"}}]}}\n",
         )
         .expect("write fixture");
 

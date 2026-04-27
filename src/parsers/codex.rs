@@ -115,15 +115,17 @@ fn entry_type(entry: &Value) -> &str {
         .unwrap_or_default()
 }
 
-fn payload<'a>(entry: &'a Value) -> &'a Value {
+fn payload(entry: &Value) -> &Value {
     entry.get("payload").unwrap_or(&Value::Null)
 }
 
 fn update_user_task(entry: &Value, options: &ExtractOptions, user_task: &mut Option<String>) {
-    user_task_text(entry)
+    if let Some(text) = user_task_text(entry)
         .filter(|text| !internal_warning_text(text))
         .map(|text| truncate(&text, options.max_task_chars))
-        .map(|text| *user_task = Some(text));
+    {
+        *user_task = Some(text);
+    }
 }
 
 fn user_task_text(entry: &Value) -> Option<String> {
@@ -242,16 +244,21 @@ fn response_item_message_state(payload: &Value) -> Option<(bool, Option<String>)
         && payload.get("role").and_then(Value::as_str) == Some("assistant"))
     .then(|| {
         let awaiting = payload.get("phase").and_then(Value::as_str) == Some("final_answer");
-        (awaiting, awaiting.then(|| assistant_output_text(payload)).flatten())
+        (
+            awaiting,
+            awaiting.then(|| assistant_output_text(payload)).flatten(),
+        )
     })
 }
 
 fn event_message_state(payload: &Value) -> Option<(bool, Option<String>)> {
-    (payload.get("type").and_then(Value::as_str) == Some("agent_message"))
-        .then(|| {
-            let awaiting = payload.get("phase").and_then(Value::as_str) == Some("final_answer");
-            (awaiting, awaiting.then(|| assistant_output_text(payload)).flatten())
-        })
+    (payload.get("type").and_then(Value::as_str) == Some("agent_message")).then(|| {
+        let awaiting = payload.get("phase").and_then(Value::as_str) == Some("final_answer");
+        (
+            awaiting,
+            awaiting.then(|| assistant_output_text(payload)).flatten(),
+        )
+    })
 }
 
 fn assistant_output_text(payload: &Value) -> Option<String> {
@@ -279,7 +286,9 @@ fn assistant_output_text(payload: &Value) -> Option<String> {
 }
 
 fn update_token_count(entry: &Value, token_count: &mut u64) {
-    token_count_from_entry(entry).map(|value| *token_count = value);
+    if let Some(value) = token_count_from_entry(entry) {
+        *token_count = value;
+    }
 }
 
 fn token_count_from_entry(entry: &Value) -> Option<u64> {
@@ -1080,7 +1089,10 @@ mod tests {
         let signal = snapshot.commit_signal.expect("commit_signal");
 
         assert!(signal.edited, "second edit should still mark edited");
-        assert!(signal.dirty_checked, "git status earlier should still count");
+        assert!(
+            signal.dirty_checked,
+            "git status earlier should still count"
+        );
         assert!(
             !signal.validated,
             "second edit must invalidate the prior validation"

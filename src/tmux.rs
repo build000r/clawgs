@@ -519,7 +519,9 @@ mod tests {
     #[test]
     fn parse_batched_capture_stops_at_end_sentinel_and_ignores_trailing_data() {
         let mut stdout = batched_stdout(&[("%1", "body")], true);
-        stdout.push_str(&format!("{BATCH_MARKER_TAG}%2{BATCH_MARKER_BYTE}\nleaked\n"));
+        stdout.push_str(&format!(
+            "{BATCH_MARKER_TAG}%2{BATCH_MARKER_BYTE}\nleaked\n"
+        ));
         let parsed = parse_batched_capture(&stdout, &["%1", "%2"]);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed["%1"], "body");
@@ -570,7 +572,11 @@ mod tests {
              {nonced_marker}{BATCH_END_SENTINEL}{BATCH_MARKER_BYTE}\n"
         );
         let parsed = parse_batched_capture_with(&stdout, nonced_marker, &["%1"]);
-        assert_eq!(parsed.len(), 1, "only %1 should be recorded; %fake forgery must not parse as a separate pane");
+        assert_eq!(
+            parsed.len(),
+            1,
+            "only %1 should be recorded; %fake forgery must not parse as a separate pane"
+        );
         let body = parsed.get("%1").expect("%1 entry");
         assert!(body.contains("real pane content"));
         assert!(

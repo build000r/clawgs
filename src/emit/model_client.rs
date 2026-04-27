@@ -174,11 +174,7 @@ const REASONING_EFFORT_ALLOWED: &[&str] = &["minimal", "low", "medium", "high"];
 /// Codex `model_verbosity` allowlist (same rationale as reasoning_effort).
 const VERBOSITY_ALLOWED: &[&str] = &["low", "medium", "high"];
 
-fn validated_codex_setting(
-    env_key: &str,
-    default: &str,
-    allowed: &[&str],
-) -> String {
+fn validated_codex_setting(env_key: &str, default: &str, allowed: &[&str]) -> String {
     match nonempty_env_var(env_key) {
         Some(value) if allowed.iter().any(|candidate| *candidate == value) => value,
         Some(value) => {
@@ -211,6 +207,12 @@ impl CodexCliModelClient {
                 VERBOSITY_ALLOWED,
             ),
         }
+    }
+}
+
+impl Default for CodexCliModelClient {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -333,6 +335,12 @@ impl ClaudeCliModelClient {
             max_budget: nonempty_env_var(CLAUDE_MAX_BUDGET_ENV)
                 .unwrap_or_else(|| DEFAULT_CLAUDE_CLI_MAX_BUDGET.to_string()),
         }
+    }
+}
+
+impl Default for ClaudeCliModelClient {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -870,10 +878,7 @@ mod tests {
             let _guard = super::TempFileGuard::new(&[present.as_path(), missing.as_path()]);
         }
 
-        assert!(
-            !present.exists(),
-            "guard must delete the temp file on drop"
-        );
+        assert!(!present.exists(), "guard must delete the temp file on drop");
         // Dropping with a missing path must not panic — long-lived daemons
         // depend on this so a partially-created exec leaves no residue.
         assert!(!missing.exists());

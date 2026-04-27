@@ -100,9 +100,13 @@ fn demo_emit_outputs_canonical_exchange_without_backends() {
     assert_eq!(json["request"]["type"], "sync");
     assert_eq!(json["response"]["type"], "sync_result");
     assert_eq!(json["response"]["stream_instance_id"], "demo-stream");
-    assert_eq!(json["response"]["metrics"]["llm_calls"], 0);
+    assert_eq!(json["response"]["metrics"]["llm_calls"], 1);
     assert!(json["response"]["metrics"]["last_backend_error"].is_null());
-    assert_eq!(json["response"]["updates"], Value::Array(Vec::new()));
+    assert_eq!(
+        json["response"]["updates"][0]["thought"],
+        "Turning raw transcripts into stable session state"
+    );
+    assert_eq!(json["response"]["updates"][0]["thought_source"], "llm");
 }
 
 #[test]

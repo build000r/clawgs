@@ -529,6 +529,7 @@ fn emit_session_thought(
     else {
         return;
     };
+    metrics.llm_calls += 1;
 
     let thought = sanitize_thought_text(&raw_thought);
     if thought.is_empty() {
@@ -561,7 +562,6 @@ fn emit_session_thought(
         prepared,
         request.now,
         updates,
-        metrics,
     );
 }
 
@@ -654,7 +654,6 @@ fn publish_generated_thought(
     prepared: &PreparedSessionContext,
     now: DateTime<Utc>,
     updates: &mut Vec<ThoughtUpdate>,
-    metrics: &mut SyncMetrics,
 ) {
     let next_state = next_thought_state(prepared.objective_changed);
     let token_count = token_count_for_context(prepared.context_snapshot.as_ref(), session);
@@ -688,7 +687,6 @@ fn publish_generated_thought(
     state.commit_candidate = prepared.next_commit_candidate;
     state.sleeping_emitted = false;
     state.last_terminal_context = Some(trim_terminal_context(&session.replay_text));
-    metrics.llm_calls += 1;
 }
 
 fn next_thought_state(objective_changed: bool) -> ThoughtState {

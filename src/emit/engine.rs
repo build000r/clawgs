@@ -239,7 +239,18 @@ impl EmitEngine {
             }
         }
 
-        let model_client = &**self.clients.get(&backend).expect("client just inserted");
+        let Some(model_client) = self.clients.get(&backend).map(|client| &**client) else {
+            metrics.last_backend_error = Some(format!(
+                "{}: model client cache missing after initialization",
+                backend.as_str()
+            ));
+            return SyncResultMessage::new(
+                request.id.clone(),
+                self.stream_instance_id.clone(),
+                updates,
+                metrics,
+            );
+        };
         let stream_instance_id = self.stream_instance_id.clone();
 
         for session in &request.sessions {
@@ -727,6 +738,7 @@ fn handle_sleeping_session(
         || state.rest_state != next_rest_state
         || state.commit_candidate != next_commit_candidate
         || state.last_emitted_thought != carried_thought;
+    let token_count = token_count_for_context(context_snapshot, session);
 
     freeze_run(state, now);
     if should_emit_sleeping {
@@ -735,7 +747,7 @@ fn handle_sleeping_session(
             state,
             session,
             carried_thought.clone(),
-            session.token_count,
+            token_count,
             session.context_limit,
             ThoughtState::Sleeping,
             carried_source,
@@ -1930,7 +1942,7 @@ mod tests {
         let context = Snapshot {
             user_task: None,
             current_tool: None,
-            token_count: 0,
+            token_count: 42,
             awaiting_user_input: true,
             awaiting_user_text: Some("Need your decision on the migration.".to_string()),
             recent_actions: Vec::new(),
@@ -1956,6 +1968,10 @@ mod tests {
         assert_eq!(
             updates[0].thought.as_deref(),
             Some("Need your decision on the migration.")
+        );
+        assert_eq!(
+            updates[0].token_count, 42,
+            "sleeping updates driven by transcript context should preserve transcript token count"
         );
         assert_eq!(updates[0].thought_state, ThoughtState::Sleeping);
         assert_eq!(updates[0].thought_source, ThoughtSource::CarryForward);

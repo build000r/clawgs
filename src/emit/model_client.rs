@@ -23,6 +23,7 @@ const CODEX_WORKDIR_ENV: &str = "CLAWGS_CODEX_WORKDIR";
 const CODEX_RUNTIME_DIR: &str = "clawgs-codex-exec";
 const CLAUDE_BIN_ENV: &str = "CLAWGS_CLAUDE_BIN";
 const CLAUDE_MAX_BUDGET_ENV: &str = "CLAWGS_CLAUDE_MAX_BUDGET";
+const CLAUDE_RUNTIME_DIR: &str = "clawgs-claude-exec";
 const MODEL_ENV_KEYS: [&str; 3] = [
     "SWIMMERS_THOUGHT_MODEL",
     "SWIMMERS_THOUGHT_MODEL_2",
@@ -129,7 +130,7 @@ impl OpenRouterModelClient {
 
 impl ModelClient for OpenRouterModelClient {
     fn complete(&self, prompt: &str, model_override: Option<&str>) -> Result<String, String> {
-        let api_key = std::env::var("OPENROUTER_API_KEY")
+        let api_key = std::env::var("OPENROUTER_API_KEY") // ubs:ignore - environment variable name, not a secret value
             .map_err(|_| "OPENROUTER_API_KEY not set".to_string())?;
         complete_with_models(
             &candidate_models(model_override, ModelBackend::OpenRouter),
@@ -325,6 +326,7 @@ impl ModelClient for CodexCliModelClient {
 
 pub struct ClaudeCliModelClient {
     bin: String,
+    runtime_dir: PathBuf,
     max_budget: String,
 }
 
@@ -332,6 +334,7 @@ impl ClaudeCliModelClient {
     pub fn new() -> Self {
         Self {
             bin: claude_bin(),
+            runtime_dir: std::env::temp_dir().join(CLAUDE_RUNTIME_DIR),
             max_budget: nonempty_env_var(CLAUDE_MAX_BUDGET_ENV)
                 .unwrap_or_else(|| DEFAULT_CLAUDE_CLI_MAX_BUDGET.to_string()),
         }
@@ -355,6 +358,26 @@ impl ModelClient for ClaudeCliModelClient {
             })
             .unwrap_or_else(|| DEFAULT_CLAUDE_CLI_MODEL.to_string());
 
+        fs::create_dir_all(&self.runtime_dir)
+            .map_err(|error| format!("failed to create {}: {error}", self.runtime_dir.display()))?;
+
+        let stamp = format!(
+            "{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let stdout_path = self.runtime_dir.join(format!("{stamp}.stdout.log"));
+        let stderr_path = self.runtime_dir.join(format!("{stamp}.stderr.log"));
+        let _cleanup = TempFileGuard::new(&[stdout_path.as_path(), stderr_path.as_path()]);
+
+        let stdout_file = File::create(&stdout_path)
+            .map_err(|error| format!("failed to create {}: {error}", stdout_path.display()))?;
+        let stderr_file = File::create(&stderr_path)
+            .map_err(|error| format!("failed to create {}: {error}", stderr_path.display()))?;
+
         let mut command = Command::new(&self.bin);
         command.args([
             "--print",
@@ -368,8 +391,8 @@ impl ModelClient for ClaudeCliModelClient {
             &self.max_budget,
         ]);
         command.stdin(Stdio::piped());
-        command.stdout(Stdio::piped());
-        command.stderr(Stdio::piped());
+        command.stdout(Stdio::from(stdout_file));
+        command.stderr(Stdio::from(stderr_file));
 
         let mut child = command
             .spawn()
@@ -406,26 +429,8 @@ impl ModelClient for ClaudeCliModelClient {
             }
         };
 
-        let stdout = child
-            .stdout
-            .take()
-            .map(|mut out| {
-                let mut buf = String::new();
-                use std::io::Read;
-                let _ = out.read_to_string(&mut buf);
-                buf
-            })
-            .unwrap_or_default();
-        let stderr = child
-            .stderr
-            .take()
-            .map(|mut err| {
-                let mut buf = String::new();
-                use std::io::Read;
-                let _ = err.read_to_string(&mut buf);
-                buf
-            })
-            .unwrap_or_default();
+        let stdout = fs::read_to_string(&stdout_path).unwrap_or_default();
+        let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
 
         if !status.success() {
             return Err(format!(
@@ -674,8 +679,8 @@ mod tests {
 
     use super::{
         build_codex_exec_args, default_model_for_backend, thought_models,
-        validate_backend_credentials, validated_codex_setting, ModelBackend,
-        REASONING_EFFORT_ALLOWED, VERBOSITY_ALLOWED,
+        validate_backend_credentials, validated_codex_setting, ClaudeCliModelClient, ModelBackend,
+        ModelClient, REASONING_EFFORT_ALLOWED, VERBOSITY_ALLOWED,
     };
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -862,6 +867,49 @@ mod tests {
             .expect_err("should fail without API key");
         assert!(err.starts_with("openrouter:"));
         assert!(err.contains("OPENROUTER_API_KEY"));
+    }
+
+    #[test]
+    fn claude_client_handles_large_stdout_without_pipe_deadlock() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("fake-claude");
+        fs::write(
+            &script_path,
+            concat!(
+                "#!/bin/sh\n",
+                "cat >/dev/null\n",
+                "i=0\n",
+                "while [ \"$i\" -lt 2000 ]; do\n",
+                "  printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n'\n",
+                "  i=$((i + 1))\n",
+                "done\n"
+            ),
+        )
+        .expect("write fake claude");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("chmod");
+
+        let client = ClaudeCliModelClient {
+            bin: script_path.to_string_lossy().into_owned(),
+            runtime_dir: dir.path().join("runtime"),
+            max_budget: "0.01".to_string(),
+        };
+
+        let output = client
+            .complete("status prompt", Some("fake-model"))
+            .expect("large stdout should complete");
+
+        assert!(
+            output.len() > 100_000,
+            "test fixture must exceed a typical pipe buffer"
+        );
     }
 
     #[test]

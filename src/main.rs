@@ -1,6 +1,7 @@
 mod demo;
 
 use std::io::{self, BufRead, Write};
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixDatagram;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -458,9 +459,9 @@ fn run_tmux_emit(args: TmuxEmitArgs) -> Result<()> {
         return Ok(());
     }
 
-    let socket = socket_guard
-        .as_ref()
-        .expect("socket guard must exist when not once");
+    let Some(socket) = socket_guard.as_ref() else {
+        return Err(anyhow::anyhow!("socket guard missing for tmux emit loop"));
+    };
     run_tmux_emit_loop(
         &mut stdout,
         &mut engine,
@@ -560,6 +561,7 @@ fn default_tmux_socket_path() -> PathBuf {
     tmux_socket_override().unwrap_or_else(fallback_tmux_socket_path)
 }
 
+#[derive(Debug)]
 struct TmuxSocketGuard {
     path: PathBuf,
     reader: UnixDatagram,
@@ -567,7 +569,9 @@ struct TmuxSocketGuard {
 
 impl Drop for TmuxSocketGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        if path_is_unix_socket(&self.path) {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -601,15 +605,29 @@ fn trimmed_env_var(key: &str) -> Option<String> {
 }
 
 fn remove_existing_socket(path: &PathBuf) -> Result<()> {
-    match path.exists() {
-        true => std::fs::remove_file(path).with_context(|| {
-            format!(
-                "failed to remove existing tmux socket at {}",
-                path.display()
-            )
-        }),
-        false => Ok(()),
+    if !path.exists() {
+        return Ok(());
     }
+
+    if !path_is_unix_socket(path) {
+        anyhow::bail!(
+            "refusing to remove non-socket path for tmux notify socket: {}",
+            path.display()
+        );
+    }
+
+    std::fs::remove_file(path).with_context(|| {
+        format!(
+            "failed to remove existing tmux socket at {}",
+            path.display()
+        )
+    })
+}
+
+fn path_is_unix_socket(path: &PathBuf) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_socket())
+        .unwrap_or(false)
 }
 
 fn should_scan_tmux(
@@ -755,16 +773,32 @@ mod tests {
     }
 
     #[test]
-    fn bind_tmux_socket_replaces_existing_file() {
+    fn bind_tmux_socket_replaces_existing_socket() {
         let dir = tempdir().expect("tempdir");
         let socket_path = dir.path().join("notify.sock");
-        std::fs::write(&socket_path, "stale").expect("write stale file");
+        let stale = UnixDatagram::bind(&socket_path).expect("bind stale socket");
+        drop(stale);
 
         let guard = bind_tmux_socket(&socket_path).expect("bind socket");
 
         assert!(socket_path.exists());
         drop(guard);
         assert!(!socket_path.exists());
+    }
+
+    #[test]
+    fn bind_tmux_socket_refuses_regular_file() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("not-a-socket");
+        std::fs::write(&socket_path, "do not delete").expect("write regular file");
+
+        let error = bind_tmux_socket(&socket_path).expect_err("regular file should not be removed");
+
+        assert!(error.to_string().contains("refusing to remove non-socket"));
+        assert_eq!(
+            std::fs::read_to_string(&socket_path).expect("regular file should remain"),
+            "do not delete"
+        );
     }
 
     #[test]

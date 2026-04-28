@@ -908,18 +908,18 @@ mod tests {
         let message: DaemonInboundMessage =
             serde_json::from_str(raw).expect("legacy sync_response alias should deserialize");
 
-        match message {
-            DaemonInboundMessage::SyncResponse {
-                request_id,
-                stream_instance_id,
-                updates,
-            } => {
-                assert_eq!(request_id, "17");
-                assert_eq!(stream_instance_id.as_deref(), None);
-                assert!(updates.is_empty());
-                assert_eq!(SYNC_RESPONSE_MESSAGE_TYPE, "sync_result");
-            }
-            other => panic!("unexpected message variant: {other:?}"),
+        assert!(matches!(message, DaemonInboundMessage::SyncResponse { .. }));
+
+        if let DaemonInboundMessage::SyncResponse {
+            request_id,
+            stream_instance_id,
+            updates,
+        } = message
+        {
+            assert_eq!(request_id, "17");
+            assert_eq!(stream_instance_id.as_deref(), None);
+            assert!(updates.is_empty());
+            assert_eq!(SYNC_RESPONSE_MESSAGE_TYPE, "sync_result");
         }
     }
 

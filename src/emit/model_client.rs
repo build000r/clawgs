@@ -679,8 +679,8 @@ mod tests {
     use super::{
         build_codex_exec_args, default_model_for_backend, extract_openrouter_content,
         failure_preview, thought_models, validate_backend_credentials, validated_codex_setting,
-        ClaudeCliModelClient, ModelBackend, ModelClient, REASONING_EFFORT_ALLOWED,
-        VERBOSITY_ALLOWED,
+        ClaudeCliModelClient, ModelBackend, ModelClient, OpenRouterModelClient,
+        REASONING_EFFORT_ALLOWED, VERBOSITY_ALLOWED,
     };
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -1001,5 +1001,38 @@ mod tests {
         let long_stderr = "x".repeat(2_000);
         let preview = failure_preview(&long_stderr, "");
         assert_eq!(preview.chars().count(), 500);
+    }
+
+    #[test]
+    fn validate_backend_credentials_rejects_missing_codex_binary() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        std::env::set_var("CLAWGS_CODEX_BIN", "/nonexistent/clawgs-codex-zzz");
+        let err = validate_backend_credentials(ModelBackend::CodexCli)
+            .expect_err("must fail when codex bin missing");
+        assert!(err.starts_with("codex:"));
+        assert!(err.contains("not found"));
+        std::env::remove_var("CLAWGS_CODEX_BIN");
+    }
+
+    #[test]
+    fn validate_backend_credentials_rejects_missing_claude_binary() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        std::env::set_var("CLAWGS_CLAUDE_BIN", "/nonexistent/clawgs-claude-zzz");
+        let err = validate_backend_credentials(ModelBackend::ClaudeCli)
+            .expect_err("must fail when claude bin missing");
+        assert!(err.starts_with("claude:"));
+        assert!(err.contains("not found"));
+        std::env::remove_var("CLAWGS_CLAUDE_BIN");
+    }
+
+    #[test]
+    fn openrouter_complete_errors_when_api_key_missing() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        std::env::remove_var("OPENROUTER_API_KEY");
+        let client = OpenRouterModelClient::new().expect("build client");
+        let err = client
+            .complete("hello", None)
+            .expect_err("must fail without key");
+        assert!(err.contains("OPENROUTER_API_KEY"));
     }
 }

@@ -30,6 +30,8 @@ pub(crate) struct ParsedLines {
     pub raw_events: Option<Vec<Value>>,
 }
 
+const RAW_EVENT_RING_CAP: usize = 20;
+
 pub(crate) fn read_jsonl(path: &Path, include_raw: bool) -> Result<ParsedLines> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     let bytes_read = bytes.len() as u64;
@@ -45,11 +47,7 @@ pub(crate) fn read_jsonl(path: &Path, include_raw: bool) -> Result<ParsedLines> 
         match serde_json::from_str::<Value>(line) {
             Ok(value) => {
                 if include_raw {
-                    raw_events.push(value.clone());
-                    if raw_events.len() > 20 {
-                        let to_remove = raw_events.len() - 20;
-                        raw_events.drain(0..to_remove);
-                    }
+                    push_raw_event(&mut raw_events, value.clone());
                 }
                 entries.push(value);
             }
@@ -63,6 +61,15 @@ pub(crate) fn read_jsonl(path: &Path, include_raw: bool) -> Result<ParsedLines> 
         bytes_read,
         raw_events: if include_raw { Some(raw_events) } else { None },
     })
+}
+
+/// Append `value` and drop the oldest entries past the ring cap. Always drains
+/// (no-op when at or below cap) so the caller doesn't need a separate length
+/// branch.
+fn push_raw_event(raw_events: &mut Vec<Value>, value: Value) {
+    raw_events.push(value);
+    let drop_count = raw_events.len().saturating_sub(RAW_EVENT_RING_CAP);
+    raw_events.drain(0..drop_count);
 }
 
 pub(crate) fn truncate(value: &str, max_chars: usize) -> String {

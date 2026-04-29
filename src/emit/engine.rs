@@ -741,6 +741,23 @@ fn token_count_for_context(context_snapshot: Option<&Snapshot>, session: &Sessio
         .unwrap_or(session.token_count)
 }
 
+/// Suppression rule for sleeping sync ticks: emit only when entering sleep,
+/// when re-emission was lost, or when one of the carried fields changes.
+/// Pulled out of `handle_sleeping_session` to keep that function's branch
+/// count low.
+fn sleeping_emit_needed(
+    state: &SessionRuntimeState,
+    next_rest_state: RestState,
+    next_commit_candidate: bool,
+    carried_thought: &Option<String>,
+) -> bool {
+    state.thought_state != ThoughtState::Sleeping
+        || !state.sleeping_emitted
+        || state.rest_state != next_rest_state
+        || state.commit_candidate != next_commit_candidate
+        || state.last_emitted_thought != *carried_thought
+}
+
 fn handle_sleeping_session(
     stream_instance_id: &str,
     state: &mut SessionRuntimeState,
@@ -760,11 +777,12 @@ fn handle_sleeping_session(
 
     let carried_thought = sleeping_thought_for_update(state, session, context_snapshot);
     let carried_source = sleeping_thought_source(state);
-    let should_emit_sleeping = state.thought_state != ThoughtState::Sleeping
-        || !state.sleeping_emitted
-        || state.rest_state != next_rest_state
-        || state.commit_candidate != next_commit_candidate
-        || state.last_emitted_thought != carried_thought;
+    let should_emit_sleeping = sleeping_emit_needed(
+        state,
+        next_rest_state,
+        next_commit_candidate,
+        &carried_thought,
+    );
     let token_count = token_count_for_context(context_snapshot, session);
 
     freeze_run(state, now);
@@ -1538,26 +1556,28 @@ fn sanitize_thought_text(raw: &str) -> String {
         }
         normalized.push_str(word);
     }
-    if normalized.is_empty() {
-        return String::new();
-    }
+    truncate_with_ellipsis(normalized, MAX_THOUGHT_CHARS)
+}
 
-    let mut iter = normalized.char_indices();
-    for _ in 0..MAX_THOUGHT_CHARS {
+/// Returns `text` unchanged when it fits within `max_chars` (counting Unicode
+/// code points, not bytes). Otherwise cuts to `max_chars - 3` chars and
+/// appends `...`. Walks the string at most three times in the truncation
+/// path; the fast path exits after `max_chars` iterations without scanning
+/// the rest of the buffer.
+fn truncate_with_ellipsis(text: String, max_chars: usize) -> String {
+    let mut iter = text.char_indices();
+    for _ in 0..=max_chars {
         if iter.next().is_none() {
-            return normalized;
+            return text;
         }
     }
-    if iter.next().is_none() {
-        return normalized;
-    }
-    let cut = normalized
+    let cut = text
         .char_indices()
-        .nth(MAX_THOUGHT_CHARS - 3)
+        .nth(max_chars - 3)
         .map(|(byte, _)| byte)
-        .unwrap_or(normalized.len());
+        .unwrap_or(text.len());
     let mut trimmed = String::with_capacity(cut + 3);
-    trimmed.push_str(&normalized[..cut]);
+    trimmed.push_str(&text[..cut]);
     trimmed.push_str("...");
     trimmed
 }
@@ -2659,6 +2679,124 @@ mod tests {
         assert!(
             state.claimed_cwd.is_none() || state.claimed_cwd.as_deref() != Some("/tmp/project-a"),
             "claimed_cwd must not reference the old CWD"
+        );
+    }
+
+    #[test]
+    fn compute_transcript_group_counts_skips_singletons() {
+        let now = Utc::now();
+        let counts = compute_transcript_group_counts(&[sample_session(now)]);
+        assert!(
+            counts.is_empty(),
+            "≤ 1 session can never share a (tool, cwd) group"
+        );
+    }
+
+    #[test]
+    fn compute_transcript_group_counts_tallies_shared_keys() {
+        let now = Utc::now();
+        let mut a = sample_session(now);
+        a.session_id = "a".to_string();
+        a.tool = Some("claude".to_string());
+        a.cwd = "/tmp/x".to_string();
+        let mut b = sample_session(now);
+        b.session_id = "b".to_string();
+        b.tool = Some("claude".to_string());
+        b.cwd = "/tmp/x".to_string();
+        let mut c = sample_session(now);
+        c.session_id = "c".to_string();
+        c.tool = Some("codex".to_string());
+        c.cwd = "/tmp/y".to_string();
+        let counts = compute_transcript_group_counts(&[a, b, c]);
+        let max = counts.values().copied().max().unwrap_or(0);
+        assert_eq!(max, 2, "two sessions share the (claude, /tmp/x) group");
+    }
+
+    #[test]
+    fn session_needs_clear_returns_false_for_idle_holding_state() {
+        let now = Utc::now();
+        let session = sample_session(now);
+        let mut state = SessionRuntimeState::initialize_from_session(&session, now);
+        state.thought_state = ThoughtState::Holding;
+        state.rest_state = RestState::Active;
+        state.commit_candidate = false;
+        let mut idle_session = session.clone();
+        idle_session.thought = None;
+        idle_session.commit_candidate = false;
+        assert!(!session_needs_clear(
+            &state,
+            &idle_session,
+            RestState::Active
+        ));
+    }
+
+    #[test]
+    fn session_needs_clear_triggers_on_each_dirty_signal() {
+        let now = Utc::now();
+        let session = sample_session(now);
+        let mut clean_session = session.clone();
+        clean_session.thought = None;
+        clean_session.commit_candidate = false;
+
+        // last_emitted_thought was set by a prior tick.
+        let mut state = SessionRuntimeState::initialize_from_session(&session, now);
+        state.last_emitted_thought = Some("stale".to_string());
+        assert!(session_needs_clear(
+            &state,
+            &clean_session,
+            RestState::Active
+        ));
+
+        // session carries a thought that needs to be cleared.
+        let base_state = SessionRuntimeState::initialize_from_session(&session, now);
+        let mut dirty_session = clean_session.clone();
+        dirty_session.thought = Some("hello".to_string());
+        assert!(session_needs_clear(
+            &base_state,
+            &dirty_session,
+            RestState::Active
+        ));
+
+        // rest_state mismatch triggers a clear.
+        let mut state = SessionRuntimeState::initialize_from_session(&session, now);
+        state.rest_state = RestState::Drowsy;
+        assert!(session_needs_clear(
+            &state,
+            &clean_session,
+            RestState::Active
+        ));
+
+        // commit_candidate flips trigger a clear.
+        let base_state = SessionRuntimeState::initialize_from_session(&session, now);
+        let mut commit_session = clean_session.clone();
+        commit_session.commit_candidate = true;
+        assert!(session_needs_clear(
+            &base_state,
+            &commit_session,
+            RestState::Active
+        ));
+    }
+
+    #[test]
+    fn carry_forward_sessions_initializes_state_and_marks_suppressed() {
+        let now = Utc::now();
+        let mut engine = mock_engine("noop");
+        let session = sample_session(now);
+        let request = SyncRequest {
+            id: "r".to_string(),
+            now,
+            config: ThoughtConfig::default(),
+            sessions: vec![session.clone()],
+        };
+        let mut metrics = SyncMetrics::default();
+
+        engine.carry_forward_sessions(&request, &mut metrics);
+
+        assert_eq!(metrics.sessions_seen, 1);
+        assert_eq!(metrics.suppressed, 1);
+        assert!(
+            engine.per_session.contains_key(&session.session_id),
+            "carry-forward must initialize per-session state for unknown sessions"
         );
     }
 }

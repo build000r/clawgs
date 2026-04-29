@@ -1,6 +1,7 @@
 # Clawgs Emit Protocol v1
 
 `clawgs emit --stdio` speaks line-delimited JSON (`NDJSON`) over stdin/stdout.
+The machine-validatable JSON Schema lives at `references/clawgs.emit.v1.schema.json`.
 
 ## Startup
 
@@ -22,6 +23,7 @@ Send one `sync` object per line:
   "config": {
     "enabled": true,
     "model": "",
+    "backend": "",
     "cadence_hot_ms": 15000,
     "cadence_warm_ms": 45000,
     "cadence_cold_ms": 120000,

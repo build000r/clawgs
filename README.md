@@ -73,7 +73,7 @@ bash scripts/check.sh
 target/release/clawgs demo extract --tool codex --pretty
 ```
 
-Protocol details live in [references/emit-protocol-v1.md](https://github.com/build000r/clawgs/blob/main/references/emit-protocol-v1.md). The extract schema lives in [references/schema-v1.md](https://github.com/build000r/clawgs/blob/main/references/schema-v1.md).
+Protocol details live in [references/emit-protocol-v1.md](https://github.com/build000r/clawgs/blob/main/references/emit-protocol-v1.md), with a machine-validatable JSON Schema at [references/clawgs.emit.v1.schema.json](references/clawgs.emit.v1.schema.json). The extract schema lives in [references/schema-v1.md](https://github.com/build000r/clawgs/blob/main/references/schema-v1.md), with JSON Schema at [references/clawgs.v1.schema.json](references/clawgs.v1.schema.json).
 
 ## Design Philosophy
 
@@ -389,7 +389,7 @@ Yes. `extract`, `demo`, `emit --stdio`, and `defaults` do not require tmux.
 
 ### Can I inspect the exact schema and protocol?
 
-Yes. See [references/schema-v1.md](https://github.com/build000r/clawgs/blob/main/references/schema-v1.md) and [references/emit-protocol-v1.md](https://github.com/build000r/clawgs/blob/main/references/emit-protocol-v1.md).
+Yes. See [references/schema-v1.md](https://github.com/build000r/clawgs/blob/main/references/schema-v1.md), [references/clawgs.v1.schema.json](references/clawgs.v1.schema.json), [references/emit-protocol-v1.md](https://github.com/build000r/clawgs/blob/main/references/emit-protocol-v1.md), and [references/clawgs.emit.v1.schema.json](references/clawgs.emit.v1.schema.json).
 
 ### Is the demo corpus the same thing as the tests?
 

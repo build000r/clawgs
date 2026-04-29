@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:clawgs:v1",
+  "title": "clawgs.v1 extract output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source", "snapshot", "stats", "generated_at"],
+  "properties": {
+    "schema_version": {
+      "const": "clawgs.v1"
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "snapshot": {
+      "$ref": "#/$defs/snapshot"
+    },
+    "stats": {
+      "$ref": "#/$defs/stats"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "raw_events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool", "path", "discovered", "cwd"],
+      "properties": {
+        "tool": {
+          "enum": ["claude", "codex"]
+        },
+        "path": {
+          "type": "string"
+        },
+        "discovered": {
+          "type": "boolean"
+        },
+        "cwd": {
+          "type": "string"
+        }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["token_count", "recent_actions"],
+      "properties": {
+        "user_task": {
+          "type": ["string", "null"]
+        },
+        "current_tool": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/action"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "token_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "awaiting_user_input": {
+          "type": "boolean"
+        },
+        "awaiting_user_text": {
+          "type": ["string", "null"]
+        },
+        "recent_actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/action"
+          }
+        },
+        "commit_signal": {
+          "$ref": "#/$defs/commit_signal"
+        }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool", "kind"],
+      "properties": {
+        "tool": {
+          "type": "string"
+        },
+        "detail": {
+          "type": ["string", "null"]
+        },
+        "kind": {
+          "enum": ["tool_use", "text", "thinking", "function_call", "other"]
+        },
+        "ts": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        }
+      }
+    },
+    "commit_signal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate", "edited", "validated", "dirty_checked", "commit_seen"],
+      "properties": {
+        "candidate": {
+          "type": "boolean"
+        },
+        "edited": {
+          "type": "boolean"
+        },
+        "validated": {
+          "type": "boolean"
+        },
+        "dirty_checked": {
+          "type": "boolean"
+        },
+        "commit_seen": {
+          "type": "boolean"
+        }
+      }
+    },
+    "stats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["events_seen", "malformed_lines_skipped", "bytes_read"],
+      "properties": {
+        "events_seen": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "malformed_lines_skipped": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bytes_read": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

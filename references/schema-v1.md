@@ -1,6 +1,7 @@
 # Clawgs Schema v1
 
 `clawgs extract` emits a single JSON document with `schema_version: "clawgs.v1"`.
+The machine-validatable JSON Schema lives at `references/clawgs.v1.schema.json`.
 
 ## Top-Level Fields
 
@@ -23,6 +24,8 @@
 - `user_task` (`string | null`): latest detected user prompt/task
 - `current_tool` (`Action | null`): latest detected tool/thinking action
 - `token_count` (`number`): latest observed `input_tokens`
+- `awaiting_user_input` (`boolean`, optional): present and `true` when the latest transcript state appears to be waiting for the user
+- `awaiting_user_text` (`string | null`, optional): short text associated with the awaiting-user state, when detected
 - `recent_actions` (`Action[]`): bounded action list, oldest to newest
 - `commit_signal` (`CommitSignal`, optional): Codex-only commit-readiness nudge derived from transcript evidence
 

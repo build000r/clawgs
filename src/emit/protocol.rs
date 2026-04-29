@@ -122,60 +122,36 @@ impl ThoughtConfig {
     }
 
     pub fn validate(&self) -> Result<(), ThoughtConfigValidationError> {
-        if self.model.chars().count() > MODEL_MAX_CHARS {
-            return Err(ThoughtConfigValidationError::new(
-                "model",
-                format!("must be <= {MODEL_MAX_CHARS} characters"),
-            ));
-        }
-
-        if !self.backend.is_empty() {
-            use crate::emit::model_client::ModelBackend;
-            if ModelBackend::from_env_value(&self.backend).is_none() {
-                return Err(ThoughtConfigValidationError::new(
-                    "backend",
-                    format!(
-                        "unrecognized backend {:?}; expected one of: openrouter, claude, codex",
-                        self.backend
-                    ),
-                ));
-            }
-        }
-
-        if !(CADENCE_HOT_MIN_MS..=CADENCE_HOT_MAX_MS).contains(&self.cadence_hot_ms) {
-            return Err(ThoughtConfigValidationError::new(
-                "cadence_hot_ms",
-                format!(
-                    "must be between {CADENCE_HOT_MIN_MS} and {CADENCE_HOT_MAX_MS} (inclusive)"
-                ),
-            ));
-        }
-
-        if self.cadence_warm_ms < self.cadence_hot_ms || self.cadence_warm_ms > CADENCE_WARM_MAX_MS
-        {
-            return Err(ThoughtConfigValidationError::new(
-                "cadence_warm_ms",
-                format!(
-                    "must be between cadence_hot_ms ({}) and {} (inclusive)",
-                    self.cadence_hot_ms, CADENCE_WARM_MAX_MS
-                ),
-            ));
-        }
-
-        if self.cadence_cold_ms < self.cadence_warm_ms || self.cadence_cold_ms > CADENCE_COLD_MAX_MS
-        {
-            return Err(ThoughtConfigValidationError::new(
-                "cadence_cold_ms",
-                format!(
-                    "must be between cadence_warm_ms ({}) and {} (inclusive)",
-                    self.cadence_warm_ms, CADENCE_COLD_MAX_MS
-                ),
-            ));
-        }
-
+        validate_model_field(&self.model)?;
+        validate_backend_field(&self.backend)?;
+        self.validate_cadences()?;
         validate_optional_len("agent_prompt", self.agent_prompt.as_deref())?;
         validate_optional_len("terminal_prompt", self.terminal_prompt.as_deref())?;
+        Ok(())
+    }
 
+    fn validate_cadences(&self) -> Result<(), ThoughtConfigValidationError> {
+        validate_cadence_range(
+            "cadence_hot_ms",
+            self.cadence_hot_ms,
+            CADENCE_HOT_MIN_MS,
+            CADENCE_HOT_MAX_MS,
+            &CADENCE_HOT_MIN_MS.to_string(),
+        )?;
+        validate_cadence_range(
+            "cadence_warm_ms",
+            self.cadence_warm_ms,
+            self.cadence_hot_ms,
+            CADENCE_WARM_MAX_MS,
+            &format!("cadence_hot_ms ({})", self.cadence_hot_ms),
+        )?;
+        validate_cadence_range(
+            "cadence_cold_ms",
+            self.cadence_cold_ms,
+            self.cadence_warm_ms,
+            CADENCE_COLD_MAX_MS,
+            &format!("cadence_warm_ms ({})", self.cadence_warm_ms),
+        )?;
         Ok(())
     }
 
@@ -599,6 +575,46 @@ fn validate_optional_len(
         return Err(ThoughtConfigValidationError::new(
             field,
             format!("must be <= {PROMPT_MAX_CHARS} characters"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_model_field(model: &str) -> Result<(), ThoughtConfigValidationError> {
+    if model.chars().count() > MODEL_MAX_CHARS {
+        return Err(ThoughtConfigValidationError::new(
+            "model",
+            format!("must be <= {MODEL_MAX_CHARS} characters"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_backend_field(backend: &str) -> Result<(), ThoughtConfigValidationError> {
+    if backend.is_empty() {
+        return Ok(());
+    }
+    use crate::emit::model_client::ModelBackend;
+    if ModelBackend::from_env_value(backend).is_none() {
+        return Err(ThoughtConfigValidationError::new(
+            "backend",
+            format!("unrecognized backend {backend:?}; expected one of: openrouter, claude, codex"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_cadence_range(
+    field: &'static str,
+    value: u64,
+    min: u64,
+    max: u64,
+    min_label: &str,
+) -> Result<(), ThoughtConfigValidationError> {
+    if !(min..=max).contains(&value) {
+        return Err(ThoughtConfigValidationError::new(
+            field,
+            format!("must be between {min_label} and {max} (inclusive)"),
         ));
     }
     Ok(())

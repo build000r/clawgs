@@ -227,14 +227,7 @@ impl ModelClient for CodexCliModelClient {
         fs::create_dir_all(&self.runtime_dir)
             .map_err(|error| format!("failed to create {}: {error}", self.runtime_dir.display()))?;
 
-        let stamp = format!(
-            "{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
+        let stamp = unique_stamp();
         let output_path = self.runtime_dir.join(format!("{stamp}.last.txt"));
         let stdout_path = self.runtime_dir.join(format!("{stamp}.stdout.log"));
         let stderr_path = self.runtime_dir.join(format!("{stamp}.stderr.log"));
@@ -249,64 +242,26 @@ impl ModelClient for CodexCliModelClient {
             stderr_path.as_path(),
         ]);
 
-        let stdout_file = File::create(&stdout_path)
-            .map_err(|error| format!("failed to create {}: {error}", stdout_path.display()))?;
-        let stderr_file = File::create(&stderr_path)
-            .map_err(|error| format!("failed to create {}: {error}", stderr_path.display()))?;
+        let output = run_subprocess_capturing(SubprocessSpec {
+            bin: &self.bin,
+            args: build_codex_exec_args(
+                &model,
+                &output_path,
+                &self.workdir,
+                &self.reasoning_effort,
+                &self.verbosity,
+            ),
+            stdin_payload: prompt.as_bytes(),
+            stdout_path: &stdout_path,
+            stderr_path: &stderr_path,
+            timeout: CODEX_EXEC_TIMEOUT,
+            label: "codex exec",
+        })?;
 
-        let mut command = Command::new(&self.bin);
-        command.args(build_codex_exec_args(
-            &model,
-            &output_path,
-            &self.workdir,
-            &self.reasoning_effort,
-            &self.verbosity,
-        ));
-        command.stdin(Stdio::piped());
-        command.stdout(Stdio::from(stdout_file));
-        command.stderr(Stdio::from(stderr_file));
-
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("failed to spawn codex exec: {error}"))?;
-
-        {
-            let Some(stdin) = child.stdin.as_mut() else {
-                return Err("codex exec missing stdin pipe".to_string());
-            };
-            stdin
-                .write_all(prompt.as_bytes())
-                .map_err(|error| format!("failed to write codex exec prompt: {error}"))?;
-        }
-        drop(child.stdin.take());
-
-        let started = Instant::now();
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if started.elapsed() < CODEX_EXEC_TIMEOUT => {
-                    thread::sleep(Duration::from_millis(50));
-                }
-                Ok(None) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!(
-                        "codex exec timed out after {}s",
-                        CODEX_EXEC_TIMEOUT.as_secs()
-                    ));
-                }
-                Err(error) => {
-                    return Err(format!("failed to wait for codex exec: {error}"));
-                }
-            }
-        };
-
-        let stdout = fs::read_to_string(&stdout_path).unwrap_or_default();
-        let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
-        if !status.success() {
+        if !output.success {
             return Err(format!(
                 "codex exec failed: {}",
-                failure_preview(&stderr, &stdout)
+                failure_preview(&output.stderr, &output.stdout)
             ));
         }
 
@@ -361,25 +316,12 @@ impl ModelClient for ClaudeCliModelClient {
         fs::create_dir_all(&self.runtime_dir)
             .map_err(|error| format!("failed to create {}: {error}", self.runtime_dir.display()))?;
 
-        let stamp = format!(
-            "{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
+        let stamp = unique_stamp();
         let stdout_path = self.runtime_dir.join(format!("{stamp}.stdout.log"));
         let stderr_path = self.runtime_dir.join(format!("{stamp}.stderr.log"));
         let _cleanup = TempFileGuard::new(&[stdout_path.as_path(), stderr_path.as_path()]);
 
-        let stdout_file = File::create(&stdout_path)
-            .map_err(|error| format!("failed to create {}: {error}", stdout_path.display()))?;
-        let stderr_file = File::create(&stderr_path)
-            .map_err(|error| format!("failed to create {}: {error}", stderr_path.display()))?;
-
-        let mut command = Command::new(&self.bin);
-        command.args([
+        let args = [
             "--print",
             "--model",
             &model,
@@ -389,57 +331,29 @@ impl ModelClient for ClaudeCliModelClient {
             "--no-session-persistence",
             "--max-budget-usd",
             &self.max_budget,
-        ]);
-        command.stdin(Stdio::piped());
-        command.stdout(Stdio::from(stdout_file));
-        command.stderr(Stdio::from(stderr_file));
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
 
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("failed to spawn claude: {error}"))?;
+        let output = run_subprocess_capturing(SubprocessSpec {
+            bin: &self.bin,
+            args,
+            stdin_payload: prompt.as_bytes(),
+            stdout_path: &stdout_path,
+            stderr_path: &stderr_path,
+            timeout: CLAUDE_CLI_TIMEOUT,
+            label: "claude exec",
+        })?;
 
-        {
-            let Some(stdin) = child.stdin.as_mut() else {
-                return Err("claude missing stdin pipe".to_string());
-            };
-            stdin
-                .write_all(prompt.as_bytes())
-                .map_err(|error| format!("failed to write claude prompt: {error}"))?;
-        }
-        drop(child.stdin.take());
-
-        let started = Instant::now();
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if started.elapsed() < CLAUDE_CLI_TIMEOUT => {
-                    thread::sleep(Duration::from_millis(50));
-                }
-                Ok(None) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!(
-                        "claude exec timed out after {}s",
-                        CLAUDE_CLI_TIMEOUT.as_secs()
-                    ));
-                }
-                Err(error) => {
-                    return Err(format!("failed to wait for claude: {error}"));
-                }
-            }
-        };
-
-        let stdout = fs::read_to_string(&stdout_path).unwrap_or_default();
-        let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
-
-        if !status.success() {
+        if !output.success {
             return Err(format!(
                 "claude exec failed: {}",
-                failure_preview(&stderr, &stdout)
+                failure_preview(&output.stderr, &output.stdout)
             ));
         }
 
-        let trimmed = stdout.trim();
+        let trimmed = output.stdout.trim();
         if trimmed.is_empty() {
             return Err("claude exec returned empty output".to_string());
         }
@@ -536,6 +450,91 @@ fn build_codex_exec_args(
         OsString::from("model_reasoning_summary=\"none\""),
         OsString::from("-"),
     ]
+}
+
+struct SubprocessSpec<'a> {
+    bin: &'a str,
+    args: Vec<OsString>,
+    stdin_payload: &'a [u8],
+    stdout_path: &'a Path,
+    stderr_path: &'a Path,
+    timeout: Duration,
+    label: &'a str,
+}
+
+struct SubprocessOutput {
+    stdout: String,
+    stderr: String,
+    success: bool,
+}
+
+fn unique_stamp() -> String {
+    format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    )
+}
+
+fn run_subprocess_capturing(spec: SubprocessSpec<'_>) -> Result<SubprocessOutput, String> {
+    let stdout_file = File::create(spec.stdout_path)
+        .map_err(|error| format!("failed to create {}: {error}", spec.stdout_path.display()))?;
+    let stderr_file = File::create(spec.stderr_path)
+        .map_err(|error| format!("failed to create {}: {error}", spec.stderr_path.display()))?;
+
+    let mut command = Command::new(spec.bin);
+    command.args(&spec.args);
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::from(stdout_file));
+    command.stderr(Stdio::from(stderr_file));
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to spawn {}: {error}", spec.label))?;
+
+    {
+        let Some(stdin) = child.stdin.as_mut() else {
+            return Err(format!("{} missing stdin pipe", spec.label));
+        };
+        stdin
+            .write_all(spec.stdin_payload)
+            .map_err(|error| format!("failed to write {} prompt: {error}", spec.label))?;
+    }
+    drop(child.stdin.take());
+
+    let status = wait_with_timeout(&mut child, spec.timeout, spec.label)?;
+    let stdout = fs::read_to_string(spec.stdout_path).unwrap_or_default();
+    let stderr = fs::read_to_string(spec.stderr_path).unwrap_or_default();
+    Ok(SubprocessOutput {
+        stdout,
+        stderr,
+        success: status.success(),
+    })
+}
+
+fn wait_with_timeout(
+    child: &mut std::process::Child,
+    timeout: Duration,
+    label: &str,
+) -> Result<std::process::ExitStatus, String> {
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if started.elapsed() < timeout => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{label} timed out after {}s", timeout.as_secs()));
+            }
+            Err(error) => return Err(format!("failed to wait for {label}: {error}")),
+        }
+    }
 }
 
 fn failure_preview(stderr: &str, stdout: &str) -> String {
@@ -678,9 +677,10 @@ mod tests {
     use std::sync::Mutex;
 
     use super::{
-        build_codex_exec_args, default_model_for_backend, thought_models,
-        validate_backend_credentials, validated_codex_setting, ClaudeCliModelClient, ModelBackend,
-        ModelClient, REASONING_EFFORT_ALLOWED, VERBOSITY_ALLOWED,
+        build_codex_exec_args, default_model_for_backend, extract_openrouter_content,
+        failure_preview, thought_models, validate_backend_credentials, validated_codex_setting,
+        ClaudeCliModelClient, ModelBackend, ModelClient, REASONING_EFFORT_ALLOWED,
+        VERBOSITY_ALLOWED,
     };
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -930,5 +930,76 @@ mod tests {
         // Dropping with a missing path must not panic — long-lived daemons
         // depend on this so a partially-created exec leaves no residue.
         assert!(!missing.exists());
+    }
+
+    #[test]
+    fn extract_openrouter_content_reads_string_message() {
+        let body = serde_json::json!({
+            "choices": [{"message": {"content": "  hello world  "}}]
+        });
+        assert_eq!(
+            extract_openrouter_content(&body),
+            Some("hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_openrouter_content_joins_array_parts() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": [
+                        {"type": "text", "text": " first "},
+                        {"type": "text", "text": "second"},
+                        {"type": "text", "text": "   "}
+                    ]
+                }
+            }]
+        });
+        assert_eq!(
+            extract_openrouter_content(&body),
+            Some("first second".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_openrouter_content_returns_none_when_blank() {
+        let blank_string = serde_json::json!({
+            "choices": [{"message": {"content": "   "}}]
+        });
+        assert_eq!(extract_openrouter_content(&blank_string), None);
+
+        let empty_array = serde_json::json!({
+            "choices": [{"message": {"content": []}}]
+        });
+        assert_eq!(extract_openrouter_content(&empty_array), None);
+
+        let missing = serde_json::json!({"choices": []});
+        assert_eq!(extract_openrouter_content(&missing), None);
+    }
+
+    #[test]
+    fn failure_preview_prefers_stderr_when_present() {
+        let preview = failure_preview("real error\n", "ignored stdout");
+        assert_eq!(preview, "real error");
+    }
+
+    #[test]
+    fn failure_preview_falls_back_to_stdout_when_stderr_blank() {
+        let preview = failure_preview("   \n", "stdout content");
+        assert_eq!(preview, "stdout content");
+    }
+
+    #[test]
+    fn failure_preview_reports_when_both_blank() {
+        let preview = failure_preview("", "");
+        assert_eq!(preview, "process exited without output");
+    }
+
+    #[test]
+    fn failure_preview_truncates_long_output_to_500_chars() {
+        let long_stderr = "x".repeat(2_000);
+        let preview = failure_preview(&long_stderr, "");
+        assert_eq!(preview.chars().count(), 500);
     }
 }

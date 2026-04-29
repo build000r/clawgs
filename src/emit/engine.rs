@@ -33,6 +33,45 @@ const DROWSY_AFTER_MS: i64 = 10_000;
 pub const DEFAULT_AGENT_PREAMBLE: &str = "You are a status reporter for a coding agent session.";
 pub const DEFAULT_TERMINAL_PREAMBLE: &str = "Terminal session status reporter.";
 
+struct BackendInitError {
+    message: String,
+    /// True when the failure was a missing credential. Sessions still get
+    /// rest-state bookkeeping so the daemon can carry forward without LLM
+    /// calls. False for hard construction failures, which return immediately.
+    allow_carry_forward: bool,
+}
+
+/// Decides whether a session has visible state that must be wiped (thought,
+/// non-holding state, mismatched rest state, or commit-candidate flag).
+/// Pulled out of `clear_all_sessions` so the branch list does not inflate CC.
+fn session_needs_clear(
+    state: &SessionRuntimeState,
+    session: &SessionSnapshot,
+    next_rest_state: RestState,
+) -> bool {
+    state.last_emitted_thought.is_some()
+        || session.thought.is_some()
+        || state.thought_state != ThoughtState::Holding
+        || state.rest_state != next_rest_state
+        || state.commit_candidate
+        || session.commit_candidate
+}
+
+/// Tally `(tool, cwd)` group occurrences across the session list. Returned
+/// empty for ≤ 1 sessions because ambiguity requires at least two snapshots
+/// sharing a key — a hot path for swimmers' single-pane sync ticks.
+fn compute_transcript_group_counts(sessions: &[SessionSnapshot]) -> HashMap<String, usize> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    if sessions.len() > 1 {
+        for session in sessions {
+            if let Some(group_key) = transcript_group_key(session) {
+                *counts.entry(group_key).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
+}
+
 struct SessionRuntimeState {
     summary_history: Vec<String>,
     last_terminal_context: Option<String>,
@@ -171,72 +210,22 @@ impl EmitEngine {
 
         if !request.config.enabled {
             self.clear_all_sessions(request, &mut updates, &mut metrics);
-            return SyncResultMessage::new(
-                request.id.clone(),
-                self.stream_instance_id.clone(),
-                updates,
-                metrics,
-            );
+            return self.build_sync_result(&request.id, updates, metrics);
         }
 
-        // Ambiguity only matters when two sessions share a (tool, cwd) group,
-        // which requires at least two sessions. Swimmers' common case is a
-        // single pane per sync tick, so skip the HashMap + format! entirely
-        // below the threshold. With zero or one session the group count is
-        // trivially non-ambiguous.
-        let mut transcript_group_counts: HashMap<String, usize> = HashMap::new();
-        if request.sessions.len() > 1 {
-            for session in &request.sessions {
-                if let Some(group_key) = transcript_group_key(session) {
-                    *transcript_group_counts.entry(group_key).or_insert(0) += 1;
-                }
-            }
-        }
+        let transcript_group_counts = compute_transcript_group_counts(&request.sessions);
 
-        // Resolve the client for this request's backend. If credential
-        // validation fails, we skip all LLM calls and carry forward.
         let backend = request
             .config
             .backend_override()
             .unwrap_or(self.default_backend);
 
-        if !self.clients.contains_key(&backend) {
-            if let Err(err) = validate_backend_credentials(backend) {
-                metrics.last_backend_error = Some(err);
-                // Process sessions without LLM — they get carry-forward
-                for session in &request.sessions {
-                    metrics.sessions_seen += 1;
-                    metrics.suppressed += 1;
-                    let state = self
-                        .per_session
-                        .entry(session.session_id.clone())
-                        .or_insert_with(|| {
-                            SessionRuntimeState::initialize_from_session(session, request.now)
-                        });
-                    let next_rest_state = rest_state_for_session(session, None, request.now);
-                    state.rest_state = next_rest_state;
-                }
-                return SyncResultMessage::new(
-                    request.id.clone(),
-                    self.stream_instance_id.clone(),
-                    updates,
-                    metrics,
-                );
+        if let Err(err) = self.ensure_client(backend) {
+            metrics.last_backend_error = Some(err.message);
+            if err.allow_carry_forward {
+                self.carry_forward_sessions(request, &mut metrics);
             }
-            match build_model_client_for(backend) {
-                Ok(client) => {
-                    self.clients.insert(backend, client);
-                }
-                Err(err) => {
-                    metrics.last_backend_error = Some(format!("{}: {err}", backend.as_str()));
-                    return SyncResultMessage::new(
-                        request.id.clone(),
-                        self.stream_instance_id.clone(),
-                        updates,
-                        metrics,
-                    );
-                }
-            }
+            return self.build_sync_result(&request.id, updates, metrics);
         }
 
         let Some(model_client) = self.clients.get(&backend).map(|client| &**client) else {
@@ -244,12 +233,7 @@ impl EmitEngine {
                 "{}: model client cache missing after initialization",
                 backend.as_str()
             ));
-            return SyncResultMessage::new(
-                request.id.clone(),
-                self.stream_instance_id.clone(),
-                updates,
-                metrics,
-            );
+            return self.build_sync_result(&request.id, updates, metrics);
         };
         let stream_instance_id = self.stream_instance_id.clone();
 
@@ -266,12 +250,62 @@ impl EmitEngine {
             );
         }
 
+        self.build_sync_result(&request.id, updates, metrics)
+    }
+
+    fn build_sync_result(
+        &self,
+        request_id: &str,
+        updates: Vec<ThoughtUpdate>,
+        metrics: SyncMetrics,
+    ) -> SyncResultMessage {
         SyncResultMessage::new(
-            request.id.clone(),
+            request_id.to_string(),
             self.stream_instance_id.clone(),
             updates,
             metrics,
         )
+    }
+
+    /// Ensures `self.clients[backend]` is populated. Returns `Err` with a
+    /// reason and a flag for whether sessions should still get carry-forward
+    /// rest-state updates (true on credential failure, false when client
+    /// construction itself fails — the latter would have populated metrics
+    /// regardless).
+    fn ensure_client(&mut self, backend: ModelBackend) -> Result<(), BackendInitError> {
+        if self.clients.contains_key(&backend) {
+            return Ok(());
+        }
+        if let Err(err) = validate_backend_credentials(backend) {
+            return Err(BackendInitError {
+                message: err,
+                allow_carry_forward: true,
+            });
+        }
+        match build_model_client_for(backend) {
+            Ok(client) => {
+                self.clients.insert(backend, client);
+                Ok(())
+            }
+            Err(err) => Err(BackendInitError {
+                message: format!("{}: {err}", backend.as_str()),
+                allow_carry_forward: false,
+            }),
+        }
+    }
+
+    fn carry_forward_sessions(&mut self, request: &SyncRequest, metrics: &mut SyncMetrics) {
+        for session in &request.sessions {
+            metrics.sessions_seen += 1;
+            metrics.suppressed += 1;
+            let state = self
+                .per_session
+                .entry(session.session_id.clone())
+                .or_insert_with(|| {
+                    SessionRuntimeState::initialize_from_session(session, request.now)
+                });
+            state.rest_state = rest_state_for_session(session, None, request.now);
+        }
     }
 
     fn clear_all_sessions(
@@ -290,14 +324,7 @@ impl EmitEngine {
                 });
             let next_rest_state = rest_state_for_session(session, None, request.now);
 
-            let needs_clear = state.last_emitted_thought.is_some()
-                || session.thought.is_some()
-                || state.thought_state != ThoughtState::Holding
-                || state.rest_state != next_rest_state
-                || state.commit_candidate
-                || session.commit_candidate;
-
-            if needs_clear {
+            if session_needs_clear(state, session, next_rest_state) {
                 updates.push(clear_thought_update(
                     &self.stream_instance_id,
                     state,

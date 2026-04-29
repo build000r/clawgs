@@ -34,35 +34,24 @@ pub(crate) fn parse(path: &Path, options: &ExtractOptions) -> Result<ParseSnapsh
         update_token_count(entry, &mut token_count);
         update_awaiting_user_state(entry, &mut awaiting_user_input, &mut awaiting_user_text);
 
-        if let Some(observation) = function_call_observation(entry, options, &ts) {
-            observe_tool_call(
-                &observation,
-                &mut pending_validation_commands,
-                &mut pending_validation_sessions,
-                &mut commit_signal,
-            );
-            record_action(
-                &mut recent_actions,
-                &mut current_tool,
-                observation.action,
-                options.max_actions,
-            );
-        }
-
-        if let Some(observation) = custom_tool_call_observation(entry, options, &ts) {
-            observe_tool_call(
-                &observation,
-                &mut pending_validation_commands,
-                &mut pending_validation_sessions,
-                &mut commit_signal,
-            );
-            record_action(
-                &mut recent_actions,
-                &mut current_tool,
-                observation.action,
-                options.max_actions,
-            );
-        }
+        observe_and_record(
+            function_call_observation(entry, options, &ts),
+            &mut pending_validation_commands,
+            &mut pending_validation_sessions,
+            &mut commit_signal,
+            &mut recent_actions,
+            &mut current_tool,
+            options.max_actions,
+        );
+        observe_and_record(
+            custom_tool_call_observation(entry, options, &ts),
+            &mut pending_validation_commands,
+            &mut pending_validation_sessions,
+            &mut commit_signal,
+            &mut recent_actions,
+            &mut current_tool,
+            options.max_actions,
+        );
 
         update_validation_signal(
             entry,
@@ -88,10 +77,7 @@ pub(crate) fn parse(path: &Path, options: &ExtractOptions) -> Result<ParseSnapsh
         );
     }
 
-    commit_signal.candidate = commit_signal.edited
-        && commit_signal.validated
-        && commit_signal.dirty_checked
-        && !commit_signal.commit_seen;
+    commit_signal.finalize();
 
     Ok(ParseSnapshot {
         user_task,
@@ -220,15 +206,21 @@ fn update_awaiting_user_state(
         return;
     }
 
-    if response_item_payload(entry, "function_call").is_some()
+    if entry_signals_agent_progress(entry) {
+        *awaiting_user_input = false;
+        *awaiting_user_text = None;
+    }
+}
+
+/// Tool calls, custom tool calls, function-call outputs, reasoning items, and
+/// agent_reasoning events all imply the agent is still mid-turn — any one of
+/// these clears the awaiting-user flag.
+fn entry_signals_agent_progress(entry: &Value) -> bool {
+    response_item_payload(entry, "function_call").is_some()
         || response_item_payload(entry, "custom_tool_call").is_some()
         || response_item_payload(entry, "function_call_output").is_some()
         || response_item_payload(entry, "reasoning").is_some()
         || event_payload(entry, "agent_reasoning").is_some()
-    {
-        *awaiting_user_input = false;
-        *awaiting_user_text = None;
-    }
 }
 
 fn assistant_turn_state(entry: &Value) -> Option<(bool, Option<String>)> {
@@ -483,6 +475,33 @@ fn extract_user_input_text(payload: &Value) -> Option<String> {
     None
 }
 
+#[allow(clippy::too_many_arguments)]
+fn observe_and_record(
+    observation: Option<ToolCallObservation>,
+    pending_validation_commands: &mut HashMap<String, String>,
+    pending_validation_sessions: &mut HashMap<String, String>,
+    commit_signal: &mut CommitSignal,
+    recent_actions: &mut Vec<Action>,
+    current_tool: &mut Option<Action>,
+    max_actions: usize,
+) {
+    let Some(observation) = observation else {
+        return;
+    };
+    observe_tool_call(
+        &observation,
+        pending_validation_commands,
+        pending_validation_sessions,
+        commit_signal,
+    );
+    record_action(
+        recent_actions,
+        current_tool,
+        observation.action,
+        max_actions,
+    );
+}
+
 fn observe_tool_call(
     observation: &ToolCallObservation,
     pending_validation_commands: &mut HashMap<String, String>,
@@ -498,24 +517,41 @@ fn observe_tool_call(
         commit_signal.validated = false;
     }
 
-    if observation.action.tool == "write_stdin" {
-        let Some(call_id) = observation.call_id.as_deref() else {
-            return;
-        };
-        let Some(session_id) = observation.session_id.as_deref() else {
-            return;
-        };
-        let Some(command) = pending_validation_sessions.get(session_id) else {
-            return;
-        };
-        pending_validation_commands.insert(call_id.to_string(), command.clone());
-        return;
+    match observation.action.tool.as_str() {
+        "write_stdin" => carry_pending_validation_to_call(
+            observation,
+            pending_validation_commands,
+            pending_validation_sessions,
+        ),
+        "exec_command" => {
+            observe_exec_command(observation, pending_validation_commands, commit_signal)
+        }
+        _ => {}
     }
+}
 
-    if observation.action.tool != "exec_command" {
+fn carry_pending_validation_to_call(
+    observation: &ToolCallObservation,
+    pending_validation_commands: &mut HashMap<String, String>,
+    pending_validation_sessions: &mut HashMap<String, String>,
+) {
+    let Some(call_id) = observation.call_id.as_deref() else {
         return;
-    }
+    };
+    let Some(session_id) = observation.session_id.as_deref() else {
+        return;
+    };
+    let Some(command) = pending_validation_sessions.get(session_id) else {
+        return;
+    };
+    pending_validation_commands.insert(call_id.to_string(), command.clone());
+}
 
+fn observe_exec_command(
+    observation: &ToolCallObservation,
+    pending_validation_commands: &mut HashMap<String, String>,
+    commit_signal: &mut CommitSignal,
+) {
     let Some(command) = observation.command.as_deref() else {
         return;
     };
@@ -523,11 +559,9 @@ fn observe_tool_call(
     if dirty_check_command(command) {
         commit_signal.dirty_checked = true;
     }
-
     if commit_command(command) {
         commit_signal.commit_seen = true;
     }
-
     if validation_command(command) {
         if let Some(call_id) = observation.call_id.as_deref() {
             pending_validation_commands.insert(call_id.to_string(), command.to_string());

@@ -77,6 +77,15 @@ pub struct CommitSignal {
     pub commit_seen: bool,
 }
 
+impl CommitSignal {
+    /// `candidate` is derived from the four observations rather than set by
+    /// callers — keep the predicate in one place so the parser doesn't drift
+    /// from the schema.
+    pub fn finalize(&mut self) {
+        self.candidate = self.edited && self.validated && self.dirty_checked && !self.commit_seen;
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Snapshot {
     #[serde(skip_serializing_if = "Option::is_none")]

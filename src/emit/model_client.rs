@@ -7,6 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const OPENROUTER_TIMEOUT: Duration = Duration::from_secs(15);
+const OPENROUTER_CHAT_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const CODEX_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 const CLAUDE_CLI_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/free";
@@ -116,15 +117,20 @@ pub fn thought_models(model_override: Option<&str>, backend: ModelBackend) -> Ve
 
 pub struct OpenRouterModelClient {
     client: reqwest::blocking::Client,
+    chat_url: String,
 }
 
 impl OpenRouterModelClient {
     pub fn new() -> Result<Self, String> {
+        Self::with_chat_url(OPENROUTER_CHAT_URL.to_string())
+    }
+
+    pub(crate) fn with_chat_url(chat_url: String) -> Result<Self, String> {
         let client = reqwest::blocking::Client::builder()
             .timeout(OPENROUTER_TIMEOUT)
             .build()
             .map_err(|error| format!("failed to build HTTP client: {error}"))?;
-        Ok(Self { client })
+        Ok(Self { client, chat_url })
     }
 }
 
@@ -134,7 +140,7 @@ impl ModelClient for OpenRouterModelClient {
             .map_err(|_| "OPENROUTER_API_KEY not set".to_string())?;
         complete_with_models(
             &candidate_models(model_override, ModelBackend::OpenRouter),
-            |model| nonempty_openrouter_response(&self.client, prompt, model, &api_key),
+            |model| nonempty_openrouter_response(&self.client, &self.chat_url, prompt, model, &api_key),
         )
     }
 }
@@ -553,11 +559,12 @@ fn failure_preview(stderr: &str, stdout: &str) -> String {
 
 fn call_openrouter(
     client: &reqwest::blocking::Client,
+    url: &str,
     prompt: &str,
     model: &str,
     api_key: &str,
 ) -> Result<Option<String>, String> {
-    call_openrouter_with_reasoning_mode(client, prompt, model, api_key, false)
+    call_openrouter_with_reasoning_mode(client, url, prompt, model, api_key, false)
 }
 
 fn build_openrouter_request_body(
@@ -583,35 +590,34 @@ fn build_openrouter_request_body(
 
 fn call_openrouter_with_reasoning_mode(
     client: &reqwest::blocking::Client,
+    url: &str,
     prompt: &str,
     model: &str,
     api_key: &str,
     suppress_reasoning: bool,
 ) -> Result<Option<String>, String> {
     let body = build_openrouter_request_body(prompt, model, suppress_reasoning);
-
     let response = client
-        .post("https://openrouter.ai/api/v1/chat/completions")
+        .post(url)
         .header("Authorization", format!("Bearer {api_key}"))
         .json(&body)
         .send()
         .map_err(|error| format!("request failed: {error}"))?;
+    let status = response.status();
+    let body_text = response.text().unwrap_or_default();
+    interpret_openrouter_response(status, body_text)
+}
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let preview: String = response
-            .text()
-            .unwrap_or_default()
-            .chars()
-            .take(500)
-            .collect();
+fn interpret_openrouter_response(
+    status: reqwest::StatusCode,
+    body_text: String,
+) -> Result<Option<String>, String> {
+    if !status.is_success() {
+        let preview: String = body_text.chars().take(500).collect();
         return Err(format!("{status}: {preview}"));
     }
-
-    let body: serde_json::Value = response
-        .json()
+    let body: serde_json::Value = serde_json::from_str(&body_text)
         .map_err(|error| format!("json parse failed: {error}"))?;
-
     Ok(extract_openrouter_content(&body))
 }
 
@@ -675,13 +681,14 @@ where
 
 fn nonempty_openrouter_response(
     client: &reqwest::blocking::Client,
+    url: &str,
     prompt: &str,
     model: &str,
     api_key: &str,
 ) -> Result<String, String> {
-    let primary = call_openrouter(client, prompt, model, api_key)?;
+    let primary = call_openrouter(client, url, prompt, model, api_key)?;
     pick_nonempty_or_fallback(primary, || {
-        call_openrouter_with_reasoning_mode(client, prompt, model, api_key, true)
+        call_openrouter_with_reasoning_mode(client, url, prompt, model, api_key, true)
             .ok()
             .flatten()
     })
@@ -690,17 +697,22 @@ fn nonempty_openrouter_response(
 #[cfg(test)]
 mod tests {
     use std::path::Path;
-    use std::sync::Mutex;
+    use std::sync::MutexGuard;
+
+    fn lock_env() -> MutexGuard<'static, ()> {
+        crate::test_support::process_env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+    }
 
     use super::{
         build_codex_exec_args, build_openrouter_request_body, default_model_for_backend,
-        extract_openrouter_content, failure_preview, pick_nonempty_or_fallback, thought_models,
-        validate_backend_credentials, validated_codex_setting, ClaudeCliModelClient,
-        CodexCliModelClient, ModelBackend, ModelClient, OpenRouterModelClient,
-        REASONING_EFFORT_ALLOWED, VERBOSITY_ALLOWED,
+        extract_openrouter_content, failure_preview, interpret_openrouter_response,
+        pick_nonempty_or_fallback, thought_models, validate_backend_credentials,
+        validated_codex_setting, ClaudeCliModelClient, CodexCliModelClient, ModelBackend,
+        ModelClient, OpenRouterModelClient, REASONING_EFFORT_ALLOWED, VERBOSITY_ALLOWED,
     };
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn thought_models_prefers_override() {
@@ -710,7 +722,7 @@ mod tests {
 
     #[test]
     fn thought_models_collects_nonempty_env_overrides_in_order() {
-        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _lock = lock_env();
         std::env::set_var("SWIMMERS_THOUGHT_MODEL", "openrouter/one");
         std::env::set_var("SWIMMERS_THOUGHT_MODEL_2", "   ");
         std::env::set_var("SWIMMERS_THOUGHT_MODEL_3", "openrouter/three");
@@ -729,7 +741,7 @@ mod tests {
 
     #[test]
     fn validated_codex_setting_accepts_allowlisted_values_and_rejects_others() {
-        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _lock = lock_env();
         std::env::set_var("CLAWGS_TEST_REASONING", "high");
         assert_eq!(
             validated_codex_setting("CLAWGS_TEST_REASONING", "low", REASONING_EFFORT_ALLOWED),
@@ -763,7 +775,7 @@ mod tests {
 
     #[test]
     fn codex_backend_falls_back_to_headless_codex_default_model() {
-        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _lock = lock_env();
         std::env::remove_var("SWIMMERS_THOUGHT_MODEL");
         std::env::remove_var("SWIMMERS_THOUGHT_MODEL_2");
         std::env::remove_var("SWIMMERS_THOUGHT_MODEL_3");
@@ -775,7 +787,7 @@ mod tests {
 
     #[test]
     fn openrouter_backend_falls_back_to_router_default_model() {
-        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _lock = lock_env();
         std::env::remove_var("SWIMMERS_THOUGHT_MODEL");
         std::env::remove_var("SWIMMERS_THOUGHT_MODEL_2");
         std::env::remove_var("SWIMMERS_THOUGHT_MODEL_3");
@@ -832,7 +844,7 @@ mod tests {
 
     #[test]
     fn claude_backend_falls_back_to_haiku_default_model() {
-        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _lock = lock_env();
         std::env::remove_var("SWIMMERS_THOUGHT_MODEL");
         std::env::remove_var("SWIMMERS_THOUGHT_MODEL_2");
         std::env::remove_var("SWIMMERS_THOUGHT_MODEL_3");
@@ -877,7 +889,7 @@ mod tests {
 
     #[test]
     fn validate_backend_credentials_rejects_missing_openrouter_key() {
-        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _lock = lock_env();
         std::env::remove_var("OPENROUTER_API_KEY");
 
         let err = validate_backend_credentials(ModelBackend::OpenRouter)
@@ -1022,7 +1034,7 @@ mod tests {
 
     #[test]
     fn validate_backend_credentials_rejects_missing_codex_binary() {
-        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _lock = lock_env();
         std::env::set_var("CLAWGS_CODEX_BIN", "/nonexistent/clawgs-codex-zzz");
         let err = validate_backend_credentials(ModelBackend::CodexCli)
             .expect_err("must fail when codex bin missing");
@@ -1033,7 +1045,7 @@ mod tests {
 
     #[test]
     fn validate_backend_credentials_rejects_missing_claude_binary() {
-        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _lock = lock_env();
         std::env::set_var("CLAWGS_CLAUDE_BIN", "/nonexistent/clawgs-claude-zzz");
         let err = validate_backend_credentials(ModelBackend::ClaudeCli)
             .expect_err("must fail when claude bin missing");
@@ -1166,7 +1178,7 @@ mod tests {
         claude_bin: &str,
         codex_bin: &str,
     ) -> ModelBackend {
-        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _lock = lock_env();
         let prior_key = std::env::var("OPENROUTER_API_KEY").ok();
         let prior_claude = std::env::var("CLAWGS_CLAUDE_BIN").ok();
         let prior_codex = std::env::var("CLAWGS_CODEX_BIN").ok();
@@ -1228,7 +1240,7 @@ mod tests {
 
     #[test]
     fn validate_backend_credentials_accepts_present_openrouter_key() {
-        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _lock = lock_env();
         let prior = std::env::var("OPENROUTER_API_KEY").ok();
         std::env::set_var("OPENROUTER_API_KEY", "sk-test-not-real");
         validate_backend_credentials(ModelBackend::OpenRouter)
@@ -1241,7 +1253,7 @@ mod tests {
 
     #[test]
     fn validate_backend_credentials_accepts_runnable_claude_binary() {
-        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _lock = lock_env();
         let prior = std::env::var("CLAWGS_CLAUDE_BIN").ok();
         std::env::set_var("CLAWGS_CLAUDE_BIN", ALWAYS_OK_BIN);
         validate_backend_credentials(ModelBackend::ClaudeCli)
@@ -1254,7 +1266,7 @@ mod tests {
 
     #[test]
     fn validate_backend_credentials_accepts_runnable_codex_binary() {
-        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _lock = lock_env();
         let prior = std::env::var("CLAWGS_CODEX_BIN").ok();
         std::env::set_var("CLAWGS_CODEX_BIN", ALWAYS_OK_BIN);
         validate_backend_credentials(ModelBackend::CodexCli)
@@ -1267,7 +1279,7 @@ mod tests {
 
     #[test]
     fn codex_cli_client_new_uses_defaults_when_env_unset() {
-        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _lock = lock_env();
         std::env::remove_var("CLAWGS_CODEX_BIN");
         std::env::remove_var("CLAWGS_CODEX_REASONING_EFFORT");
         std::env::remove_var("CLAWGS_CODEX_VERBOSITY");
@@ -1281,7 +1293,7 @@ mod tests {
 
     #[test]
     fn claude_cli_client_new_uses_defaults_when_env_unset() {
-        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _lock = lock_env();
         std::env::remove_var("CLAWGS_CLAUDE_BIN");
         std::env::remove_var("CLAWGS_CLAUDE_MAX_BUDGET");
         let client = ClaudeCliModelClient::new();
@@ -1327,8 +1339,156 @@ mod tests {
     }
 
     #[test]
+    fn interpret_openrouter_response_returns_content_on_2xx_with_string_body() {
+        let body = r#"{"choices":[{"message":{"content":"hi there"}}]}"#;
+        let result =
+            interpret_openrouter_response(reqwest::StatusCode::OK, body.to_string()).unwrap();
+        assert_eq!(result, Some("hi there".to_string()));
+    }
+
+    #[test]
+    fn interpret_openrouter_response_returns_none_when_content_is_blank() {
+        let body = r#"{"choices":[{"message":{"content":"   "}}]}"#;
+        let result =
+            interpret_openrouter_response(reqwest::StatusCode::OK, body.to_string()).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn interpret_openrouter_response_surfaces_status_with_body_preview_on_error() {
+        let err = interpret_openrouter_response(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            "rate limited".to_string(),
+        )
+        .expect_err("non-2xx must error");
+        assert!(err.contains("429"));
+        assert!(err.contains("rate limited"));
+    }
+
+    #[test]
+    fn interpret_openrouter_response_truncates_huge_error_body_to_500_chars() {
+        let huge = "a".repeat(2_000);
+        let err = interpret_openrouter_response(reqwest::StatusCode::BAD_GATEWAY, huge)
+            .expect_err("non-2xx must error");
+        let preview_only: String = err
+            .split_once(':')
+            .map(|(_, rest)| rest)
+            .unwrap_or("")
+            .trim()
+            .chars()
+            .collect();
+        assert_eq!(preview_only.chars().count(), 500);
+    }
+
+    #[test]
+    fn interpret_openrouter_response_errors_when_2xx_body_is_not_json() {
+        let err =
+            interpret_openrouter_response(reqwest::StatusCode::OK, "definitely not json".into())
+                .expect_err("malformed JSON must error");
+        assert!(err.starts_with("json parse failed:"));
+    }
+
+    /// Builds an HTTP/1.1 response framed with `Connection: close` so the
+    /// caller doesn't need to compute Content-Length for the canned body.
+    fn http_close_response(status_line: &str, body: &str) -> String {
+        format!(
+            "{status_line}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}"
+        )
+    }
+
+    fn spawn_canned_responses(responses: Vec<String>) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let port = listener.local_addr().expect("addr").port();
+
+        thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+                let _ = stream.flush();
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+        });
+
+        format!("http://127.0.0.1:{port}/")
+    }
+
+    fn clear_swimmers_env() {
+        std::env::remove_var("SWIMMERS_THOUGHT_MODEL");
+        std::env::remove_var("SWIMMERS_THOUGHT_MODEL_2");
+        std::env::remove_var("SWIMMERS_THOUGHT_MODEL_3");
+    }
+
+    #[test]
+    fn openrouter_client_complete_returns_content_from_canned_http_response() {
+        let _lock = lock_env();
+        std::env::set_var("OPENROUTER_API_KEY", "test-key-not-real");
+        clear_swimmers_env();
+
+        let url = spawn_canned_responses(vec![http_close_response(
+            "HTTP/1.1 200 OK",
+            r#"{"choices":[{"message":{"content":"  remote ok  "}}]}"#,
+        )]);
+        let client = OpenRouterModelClient::with_chat_url(url).expect("client");
+        let answer = client.complete("hello", None).expect("ok");
+        assert_eq!(answer, "remote ok");
+
+        std::env::remove_var("OPENROUTER_API_KEY");
+    }
+
+    #[test]
+    fn openrouter_client_complete_falls_back_to_suppress_reasoning_when_first_response_blank() {
+        let _lock = lock_env();
+        std::env::set_var("OPENROUTER_API_KEY", "test-key-not-real");
+        clear_swimmers_env();
+
+        let url = spawn_canned_responses(vec![
+            http_close_response(
+                "HTTP/1.1 200 OK",
+                r#"{"choices":[{"message":{"content":"   "}}]}"#,
+            ),
+            http_close_response(
+                "HTTP/1.1 200 OK",
+                r#"{"choices":[{"message":{"content":"with reasoning"}}]}"#,
+            ),
+        ]);
+        let client = OpenRouterModelClient::with_chat_url(url).expect("client");
+        let answer = client.complete("hi", None).expect("fallback ok");
+        assert_eq!(answer, "with reasoning");
+
+        std::env::remove_var("OPENROUTER_API_KEY");
+    }
+
+    #[test]
+    fn openrouter_client_complete_surfaces_status_error_from_remote() {
+        let _lock = lock_env();
+        std::env::set_var("OPENROUTER_API_KEY", "test-key-not-real");
+        clear_swimmers_env();
+
+        // Both attempts return 500. The client must error out with all-models
+        // surfaced via complete_with_models.
+        let url = spawn_canned_responses(vec![
+            http_close_response("HTTP/1.1 500 Internal Server Error", "boom-503"),
+            http_close_response("HTTP/1.1 500 Internal Server Error", "boom-503"),
+        ]);
+        let client = OpenRouterModelClient::with_chat_url(url).expect("client");
+        let err = client.complete("hi", None).expect_err("must propagate failure");
+        assert!(err.contains("all models failed"));
+        assert!(err.contains("500"));
+
+        std::env::remove_var("OPENROUTER_API_KEY");
+    }
+
+    #[test]
     fn openrouter_complete_errors_when_api_key_missing() {
-        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _lock = lock_env();
         std::env::remove_var("OPENROUTER_API_KEY");
         let client = OpenRouterModelClient::new().expect("build client");
         let err = client

@@ -36,31 +36,55 @@ pub(crate) fn read_jsonl(path: &Path, include_raw: bool) -> Result<ParsedLines> 
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     let bytes_read = bytes.len() as u64;
 
-    let mut entries = Vec::new();
-    let mut malformed_lines_skipped = 0;
-    let mut raw_events: Vec<Value> = Vec::new();
-
+    let mut acc = JsonlAccumulator::new(include_raw);
     for line in String::from_utf8_lossy(&bytes)
         .lines()
         .filter(|line| !line.trim().is_empty())
     {
-        match serde_json::from_str::<Value>(line) {
-            Ok(value) => {
-                if include_raw {
-                    push_raw_event(&mut raw_events, value.clone());
-                }
-                entries.push(value);
-            }
-            Err(_) => malformed_lines_skipped += 1,
+        acc.ingest(line);
+    }
+
+    Ok(acc.into_parsed_lines(bytes_read))
+}
+
+struct JsonlAccumulator {
+    entries: Vec<Value>,
+    malformed_lines_skipped: u64,
+    raw_events: Vec<Value>,
+    include_raw: bool,
+}
+
+impl JsonlAccumulator {
+    fn new(include_raw: bool) -> Self {
+        Self {
+            entries: Vec::new(),
+            malformed_lines_skipped: 0,
+            raw_events: Vec::new(),
+            include_raw,
         }
     }
 
-    Ok(ParsedLines {
-        entries,
-        malformed_lines_skipped,
-        bytes_read,
-        raw_events: if include_raw { Some(raw_events) } else { None },
-    })
+    fn ingest(&mut self, line: &str) {
+        match serde_json::from_str::<Value>(line) {
+            Ok(value) => {
+                if self.include_raw {
+                    push_raw_event(&mut self.raw_events, value.clone());
+                }
+                self.entries.push(value);
+            }
+            Err(_) => self.malformed_lines_skipped += 1,
+        }
+    }
+
+    fn into_parsed_lines(self, bytes_read: u64) -> ParsedLines {
+        let raw_events = self.include_raw.then_some(self.raw_events);
+        ParsedLines {
+            entries: self.entries,
+            malformed_lines_skipped: self.malformed_lines_skipped,
+            bytes_read,
+            raw_events,
+        }
+    }
 }
 
 /// Append `value` and drop the oldest entries past the ring cap. Always drains

@@ -104,19 +104,8 @@ impl TmuxScanTracker {
         let observed_activity = previous
             .map(|state| state.changed(&observation))
             .unwrap_or(false);
-        let last_activity_at = match previous {
-            Some(state) if !observed_activity => state.last_activity_at,
-            _ => now,
-        };
-        let sticky_busy =
-            sticky_busy_state(&observation.current_command, observation.tool.as_deref());
-        let bootstrap_busy = previous.is_none()
-            && bootstrap_busy(&observation.current_command, observation.tool.as_deref());
-        let state = if observed_activity || bootstrap_busy || sticky_busy {
-            SessionState::Busy
-        } else {
-            SessionState::Idle
-        };
+        let last_activity_at = last_activity_for(previous, observed_activity, now);
+        let state = derive_session_state(previous.is_some(), observed_activity, &observation);
 
         let session_id = observation.session_id.clone();
         let tool = observation.tool.clone();
@@ -146,6 +135,32 @@ impl TmuxScanTracker {
             rest_state: RestState::Active,
             commit_candidate: false,
         }
+    }
+}
+
+fn last_activity_for(
+    previous: Option<&TrackedSession>,
+    observed_activity: bool,
+    now: DateTime<Utc>,
+) -> DateTime<Utc> {
+    match previous {
+        Some(state) if !observed_activity => state.last_activity_at,
+        _ => now,
+    }
+}
+
+fn derive_session_state(
+    has_previous: bool,
+    observed_activity: bool,
+    observation: &SessionObservation,
+) -> SessionState {
+    let sticky = sticky_busy_state(&observation.current_command, observation.tool.as_deref());
+    let bootstrap =
+        !has_previous && bootstrap_busy(&observation.current_command, observation.tool.as_deref());
+    if observed_activity || bootstrap || sticky {
+        SessionState::Busy
+    } else {
+        SessionState::Idle
     }
 }
 

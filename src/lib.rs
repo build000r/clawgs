@@ -507,6 +507,17 @@ pub(crate) mod test_support {
         static HOME_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         HOME_ENV_LOCK.get_or_init(|| Mutex::new(()))
     }
+
+    /// Single mutex shared across every test that mutates process-wide env
+    /// vars consumed by the model client and engine
+    /// (`OPENROUTER_API_KEY`, `CLAWGS_CLAUDE_BIN`, `CLAWGS_CODEX_BIN`,
+    /// `CLAWGS_CLAUDE_MAX_BUDGET`, `SWIMMERS_THOUGHT_MODEL*`, etc.).
+    /// Without a single shared lock, model_client tests racing engine tests
+    /// can leave the wrong env state visible to whichever test reads first.
+    pub(crate) fn process_env_lock() -> &'static Mutex<()> {
+        static PROCESS_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        PROCESS_ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
 }
 
 #[cfg(test)]
@@ -540,6 +551,71 @@ mod tests {
 
         let tool = infer_tool_from_file(file.path()).expect("infer tool");
         assert_eq!(tool, AgentTool::Claude);
+    }
+
+    #[test]
+    fn codex_file_matches_cwd_returns_false_for_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("does-not-exist.jsonl");
+        assert!(!codex_file_matches_cwd(&missing, dir.path()));
+    }
+
+    #[test]
+    fn codex_file_matches_cwd_returns_false_for_empty_file() {
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(file.path(), b"").expect("write");
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(!codex_file_matches_cwd(file.path(), dir.path()));
+    }
+
+    #[test]
+    fn codex_file_matches_cwd_returns_false_for_malformed_first_line() {
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(file.path(), b"this is not json\n").expect("write");
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(!codex_file_matches_cwd(file.path(), dir.path()));
+    }
+
+    #[test]
+    fn codex_file_matches_cwd_returns_false_when_first_line_is_not_session_meta() {
+        let file = NamedTempFile::new().expect("temp file");
+        // Valid JSON but not a session_meta row, so no cwd inference applies.
+        fs::write(file.path(), b"{\"type\":\"response_item\"}\n").expect("write");
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(!codex_file_matches_cwd(file.path(), dir.path()));
+    }
+
+    #[test]
+    fn codex_file_matches_cwd_returns_false_when_payload_cwd_is_missing() {
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(file.path(), b"{\"type\":\"session_meta\",\"payload\":{}}\n").expect("write");
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(!codex_file_matches_cwd(file.path(), dir.path()));
+    }
+
+    #[test]
+    fn codex_file_matches_cwd_returns_false_when_payload_cwd_does_not_match() {
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            b"{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/some/other\"}}\n",
+        )
+        .expect("write");
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(!codex_file_matches_cwd(file.path(), dir.path()));
+    }
+
+    #[test]
+    fn codex_file_matches_cwd_returns_true_when_payload_cwd_matches_exactly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd_str = dir.path().display().to_string();
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            format!("{{\"type\":\"session_meta\",\"payload\":{{\"cwd\":\"{cwd_str}\"}}}}\n"),
+        )
+        .expect("write");
+        assert!(codex_file_matches_cwd(file.path(), dir.path()));
     }
 
     #[test]

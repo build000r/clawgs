@@ -49,12 +49,21 @@ fn session_needs_clear(
     session: &SessionSnapshot,
     next_rest_state: RestState,
 ) -> bool {
+    runtime_state_needs_clear(state, next_rest_state) || session_carries_dirty_signal(session)
+}
+
+fn runtime_state_needs_clear(
+    state: &SessionRuntimeState,
+    next_rest_state: RestState,
+) -> bool {
     state.last_emitted_thought.is_some()
-        || session.thought.is_some()
         || state.thought_state != ThoughtState::Holding
         || state.rest_state != next_rest_state
         || state.commit_candidate
-        || session.commit_candidate
+}
+
+fn session_carries_dirty_signal(session: &SessionSnapshot) -> bool {
+    session.thought.is_some() || session.commit_candidate
 }
 
 /// Tally `(tool, cwd)` group occurrences across the session list. Returned
@@ -349,6 +358,33 @@ impl EmitEngine {
     }
 }
 
+/// Drop a stale JSONL claim when the pane has switched CWDs since we last
+/// pinned a transcript file. Keeping the old claim would attribute another
+/// project's transcript to this session.
+fn invalidate_stale_claim(state: &mut SessionRuntimeState, session: &SessionSnapshot) {
+    if state
+        .claimed_cwd
+        .as_deref()
+        .is_some_and(|prev| prev != session.cwd)
+    {
+        state.claimed_jsonl_path = None;
+        state.claimed_cwd = None;
+    }
+}
+
+/// Record the freshly resolved transcript path (if any) and pin the CWD that
+/// produced it, so the next observation can detect a switch.
+fn store_resolved_claim(
+    state: &mut SessionRuntimeState,
+    session: &SessionSnapshot,
+    resolved_path: Option<std::path::PathBuf>,
+) {
+    if resolved_path.is_some() {
+        state.claimed_cwd = Some(session.cwd.clone());
+    }
+    state.claimed_jsonl_path = resolved_path;
+}
+
 fn process_session(
     model_client: &dyn ModelClient,
     stream_instance_id: &str,
@@ -370,16 +406,7 @@ fn process_session(
         .entry(session.session_id.clone())
         .or_insert_with(|| SessionRuntimeState::initialize_from_session(session, request.now));
 
-    // Invalidate stale claim when the pane's CWD has changed (e.g. new
-    // claude session started in a different project within the same pane).
-    if state
-        .claimed_cwd
-        .as_deref()
-        .is_some_and(|prev| prev != session.cwd)
-    {
-        state.claimed_jsonl_path = None;
-        state.claimed_cwd = None;
-    }
+    invalidate_stale_claim(state, session);
 
     let (context_snapshot, resolved_path) = context_snapshot_for_session_with_claim(
         session,
@@ -387,10 +414,7 @@ fn process_session(
         transcript_group_is_ambiguous(session, transcript_group_counts),
     );
     let context_source = context_source_for_snapshot(context_snapshot.as_ref());
-    state.claimed_jsonl_path = resolved_path.clone();
-    if resolved_path.is_some() {
-        state.claimed_cwd = Some(session.cwd.clone());
-    }
+    store_resolved_claim(state, session, resolved_path);
     let next_rest_state = rest_state_for_session(session, context_snapshot.as_ref(), request.now);
     let next_commit_candidate = commit_candidate_for_context(context_snapshot.as_ref());
 
@@ -1670,21 +1694,32 @@ fn osc_escape_terminated(next: char, chars: &mut std::iter::Peekable<std::str::C
 fn context_focus_fingerprint(snapshot: &Snapshot, state: &SessionState) -> u64 {
     let mut parts = vec![format!("state={}", state_label(state))];
 
-    if let Some(task) = snapshot.user_task.as_deref() {
-        let normalized = normalize_for_focus(task);
-        if !normalized.is_empty() {
-            parts.push(format!("task={normalized}"));
-        }
+    push_normalized_focus_part(&mut parts, "task", snapshot.user_task.as_deref());
+    push_normalized_focus_part(
+        &mut parts,
+        "now",
+        snapshot.current_tool.as_ref().map(|tool| tool.tool.as_str()),
+    );
+
+    let recent_tools = recent_focus_tools(snapshot);
+    if !recent_tools.is_empty() {
+        parts.push(format!("recent={}", recent_tools.join(",")));
     }
 
-    if let Some(current_tool) = snapshot.current_tool.as_ref() {
-        let normalized = normalize_for_focus(&current_tool.tool);
+    hash_string(&parts.join("|"))
+}
+
+fn push_normalized_focus_part(parts: &mut Vec<String>, label: &str, raw: Option<&str>) {
+    if let Some(value) = raw {
+        let normalized = normalize_for_focus(value);
         if !normalized.is_empty() {
-            parts.push(format!("now={normalized}"));
+            parts.push(format!("{label}={normalized}"));
         }
     }
+}
 
-    let recent_tools: Vec<String> = snapshot
+fn recent_focus_tools(snapshot: &Snapshot) -> Vec<String> {
+    snapshot
         .recent_actions
         .iter()
         .rev()
@@ -1694,12 +1729,7 @@ fn context_focus_fingerprint(snapshot: &Snapshot, state: &SessionState) -> u64 {
         .rev()
         .map(|action| normalize_for_focus(&action.tool))
         .filter(|tool| !tool.is_empty())
-        .collect();
-    if !recent_tools.is_empty() {
-        parts.push(format!("recent={}", recent_tools.join(",")));
-    }
-
-    hash_string(&parts.join("|"))
+        .collect()
 }
 
 fn terminal_objective_fingerprint(context: &str, state: &SessionState) -> String {
@@ -1747,17 +1777,21 @@ fn hash_string(value: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::sync::Mutex;
+    use std::sync::MutexGuard;
 
     use chrono::Duration;
     use tempfile::tempdir;
 
     use super::*;
 
-    /// Serializes tests that mutate process env vars consumed by the model
-    /// client (CLAWGS_CLAUDE_BIN, CLAWGS_CODEX_BIN, OPENROUTER_API_KEY) so
-    /// they cannot race the model_client tests or each other.
-    static ENGINE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    /// Acquire the crate-wide process-env lock so engine tests cannot race
+    /// model_client tests on `CLAWGS_CLAUDE_BIN`, `CLAWGS_CODEX_BIN`, or
+    /// `OPENROUTER_API_KEY`.
+    fn lock_env() -> MutexGuard<'static, ()> {
+        crate::test_support::process_env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+    }
     use crate::emit::model_client::{ModelBackend, ModelClient};
     use crate::emit::protocol::{SessionSnapshot, SessionState, SyncRequest, ThoughtConfig};
 
@@ -1939,7 +1973,7 @@ mod tests {
         // allow_carry_forward=true, which means metrics record the error and
         // every active session is carried forward (suppressed) rather than
         // emitted.
-        let _lock = ENGINE_ENV_LOCK.lock().expect("env lock");
+        let _lock = lock_env();
         let prior_claude = std::env::var("CLAWGS_CLAUDE_BIN").ok();
         let prior_codex = std::env::var("CLAWGS_CODEX_BIN").ok();
         std::env::set_var("CLAWGS_CLAUDE_BIN", "/nonexistent/claude-zzz");
@@ -1983,6 +2017,52 @@ mod tests {
         match prior_codex {
             Some(value) => std::env::set_var("CLAWGS_CODEX_BIN", value),
             None => std::env::remove_var("CLAWGS_CODEX_BIN"),
+        }
+    }
+
+    #[test]
+    fn ensure_client_builds_real_client_when_credentials_validate() {
+        // Default backend has a mock client; the request overrides to ClaudeCli.
+        // With CLAWGS_CLAUDE_BIN pointed at /usr/bin/true, validate_backend_credentials
+        // succeeds and build_model_client_for actually constructs a
+        // ClaudeCliModelClient. The subsequent complete() call against
+        // /usr/bin/true exits 0 with empty stdout and surfaces an error,
+        // which is enough to confirm the build branch executed.
+        let _lock = lock_env();
+        let prior_claude = std::env::var("CLAWGS_CLAUDE_BIN").ok();
+        std::env::set_var("CLAWGS_CLAUDE_BIN", "/usr/bin/true");
+
+        let now = Utc::now();
+        let mut engine = mock_engine("never invoked because override picks claude");
+        let config = ThoughtConfig {
+            backend: "claude".to_string(),
+            ..ThoughtConfig::default()
+        };
+        let request = SyncRequest {
+            id: "req-build".to_string(),
+            now,
+            config,
+            sessions: vec![sample_session(now)],
+        };
+
+        let result = engine.sync(&request);
+        // build_model_client_for(Claude) ran, complete() then ran on /usr/bin/true.
+        // Either it surfaced a backend_error from the empty CLI output or it
+        // emitted a thought (unlikely for /usr/bin/true). Either way,
+        // ensure_client did not short-circuit on credentials.
+        assert!(
+            result
+                .metrics
+                .last_backend_error
+                .as_deref()
+                .is_none_or(|err| !err.contains("not found")),
+            "expected ensure_client to pass validation, got {:?}",
+            result.metrics.last_backend_error
+        );
+
+        match prior_claude {
+            Some(value) => std::env::set_var("CLAWGS_CLAUDE_BIN", value),
+            None => std::env::remove_var("CLAWGS_CLAUDE_BIN"),
         }
     }
 

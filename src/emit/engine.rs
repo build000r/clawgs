@@ -1747,11 +1747,17 @@ fn hash_string(value: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::Mutex;
 
     use chrono::Duration;
     use tempfile::tempdir;
 
     use super::*;
+
+    /// Serializes tests that mutate process env vars consumed by the model
+    /// client (CLAWGS_CLAUDE_BIN, CLAWGS_CODEX_BIN, OPENROUTER_API_KEY) so
+    /// they cannot race the model_client tests or each other.
+    static ENGINE_ENV_LOCK: Mutex<()> = Mutex::new(());
     use crate::emit::model_client::{ModelBackend, ModelClient};
     use crate::emit::protocol::{SessionSnapshot, SessionState, SyncRequest, ThoughtConfig};
 
@@ -1923,6 +1929,61 @@ mod tests {
             Some("codex exec failed: not authenticated")
         );
         assert!(result.metrics.suppressed > 0);
+    }
+
+    #[test]
+    fn ensure_client_carries_forward_when_override_backend_credentials_missing() {
+        // The default backend has a working mock client, but the request
+        // overrides to ClaudeCli. With CLAWGS_CLAUDE_BIN pointed at a path
+        // that doesn't exist, validate_backend_credentials should fail with
+        // allow_carry_forward=true, which means metrics record the error and
+        // every active session is carried forward (suppressed) rather than
+        // emitted.
+        let _lock = ENGINE_ENV_LOCK.lock().expect("env lock");
+        let prior_claude = std::env::var("CLAWGS_CLAUDE_BIN").ok();
+        let prior_codex = std::env::var("CLAWGS_CODEX_BIN").ok();
+        std::env::set_var("CLAWGS_CLAUDE_BIN", "/nonexistent/claude-zzz");
+        std::env::set_var("CLAWGS_CODEX_BIN", "/nonexistent/codex-zzz");
+
+        let now = Utc::now();
+        let mut engine = mock_engine("ignored — never invoked");
+
+        let config = ThoughtConfig {
+            backend: "claude".to_string(),
+            ..ThoughtConfig::default()
+        };
+        let request = SyncRequest {
+            id: "req-1".to_string(),
+            now,
+            config,
+            sessions: vec![sample_session(now)],
+        };
+        let result = engine.sync(&request);
+
+        assert!(result.updates.is_empty(), "no LLM emits when client init fails");
+        assert_eq!(result.metrics.llm_calls, 0);
+        assert!(
+            result
+                .metrics
+                .last_backend_error
+                .as_deref()
+                .is_some_and(|err| err.starts_with("claude:") && err.contains("not found")),
+            "expected claude credential error, got {:?}",
+            result.metrics.last_backend_error
+        );
+        assert!(
+            result.metrics.suppressed > 0,
+            "carry-forward must record at least one suppressed session"
+        );
+
+        match prior_claude {
+            Some(value) => std::env::set_var("CLAWGS_CLAUDE_BIN", value),
+            None => std::env::remove_var("CLAWGS_CLAUDE_BIN"),
+        }
+        match prior_codex {
+            Some(value) => std::env::set_var("CLAWGS_CODEX_BIN", value),
+            None => std::env::remove_var("CLAWGS_CODEX_BIN"),
+        }
     }
 
     #[test]

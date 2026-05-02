@@ -543,6 +543,36 @@ mod tests {
     }
 
     #[test]
+    fn infer_tool_errors_when_no_line_carries_a_tool_marker() {
+        let file = NamedTempFile::new().expect("temp file");
+        // Two lines with no tool-shaped fields and one malformed JSON line —
+        // none should yield an inference, so the for-loop must exhaust and
+        // the function must surface the help-text error.
+        fs::write(
+            file.path(),
+            "{\"unrelated\":1}\n{\"another\":\"thing\"}\nnot-json\n",
+        )
+        .expect("write file");
+
+        let err = infer_tool_from_file(file.path())
+            .expect_err("inference should fail on unrecognized content");
+        let message = err.to_string();
+        assert!(
+            message.contains("could not infer tool format"),
+            "got: {message}"
+        );
+        assert!(message.contains("--tool claude or --tool codex"));
+    }
+
+    #[test]
+    fn infer_tool_errors_when_input_path_does_not_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("not-here.jsonl");
+        let err = infer_tool_from_file(&missing).expect_err("must fail without file");
+        assert!(err.to_string().contains("failed to open input file"));
+    }
+
+    #[test]
     fn infer_codex_tool_from_payload_marker() {
         let file = NamedTempFile::new().expect("temp file");
         fs::write(file.path(), "{\"payload\":{\"cwd\":\"/tmp/project\"}}\n").expect("write file");

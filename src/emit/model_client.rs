@@ -560,13 +560,11 @@ fn call_openrouter(
     call_openrouter_with_reasoning_mode(client, prompt, model, api_key, false)
 }
 
-fn call_openrouter_with_reasoning_mode(
-    client: &reqwest::blocking::Client,
+fn build_openrouter_request_body(
     prompt: &str,
     model: &str,
-    api_key: &str,
     suppress_reasoning: bool,
-) -> Result<Option<String>, String> {
+) -> serde_json::Value {
     let mut body = serde_json::json!({
         "model": model,
         "max_tokens": 80,
@@ -580,6 +578,17 @@ fn call_openrouter_with_reasoning_mode(
             "exclude": true
         });
     }
+    body
+}
+
+fn call_openrouter_with_reasoning_mode(
+    client: &reqwest::blocking::Client,
+    prompt: &str,
+    model: &str,
+    api_key: &str,
+    suppress_reasoning: bool,
+) -> Result<Option<String>, String> {
+    let body = build_openrouter_request_body(prompt, model, suppress_reasoning);
 
     let response = client
         .post("https://openrouter.ai/api/v1/chat/completions")
@@ -655,20 +664,27 @@ where
         )
 }
 
+fn pick_nonempty_or_fallback<F>(primary: Option<String>, fallback: F) -> Result<String, String>
+where
+    F: FnOnce() -> Option<String>,
+{
+    primary
+        .or_else(fallback)
+        .ok_or_else(|| "returned empty".to_string())
+}
+
 fn nonempty_openrouter_response(
     client: &reqwest::blocking::Client,
     prompt: &str,
     model: &str,
     api_key: &str,
 ) -> Result<String, String> {
-    if let Some(content) = call_openrouter(client, prompt, model, api_key)? {
-        return Ok(content);
-    }
-
-    match call_openrouter_with_reasoning_mode(client, prompt, model, api_key, true) {
-        Ok(Some(content)) => Ok(content),
-        Ok(None) | Err(_) => Err("returned empty".to_string()),
-    }
+    let primary = call_openrouter(client, prompt, model, api_key)?;
+    pick_nonempty_or_fallback(primary, || {
+        call_openrouter_with_reasoning_mode(client, prompt, model, api_key, true)
+            .ok()
+            .flatten()
+    })
 }
 
 #[cfg(test)]
@@ -677,9 +693,10 @@ mod tests {
     use std::sync::Mutex;
 
     use super::{
-        build_codex_exec_args, default_model_for_backend, extract_openrouter_content,
-        failure_preview, thought_models, validate_backend_credentials, validated_codex_setting,
-        ClaudeCliModelClient, ModelBackend, ModelClient, OpenRouterModelClient,
+        build_codex_exec_args, build_openrouter_request_body, default_model_for_backend,
+        extract_openrouter_content, failure_preview, pick_nonempty_or_fallback, thought_models,
+        validate_backend_credentials, validated_codex_setting, ClaudeCliModelClient,
+        CodexCliModelClient, ModelBackend, ModelClient, OpenRouterModelClient,
         REASONING_EFFORT_ALLOWED, VERBOSITY_ALLOWED,
     };
 
@@ -1023,6 +1040,290 @@ mod tests {
         assert!(err.starts_with("claude:"));
         assert!(err.contains("not found"));
         std::env::remove_var("CLAWGS_CLAUDE_BIN");
+    }
+
+    fn write_fake_codex(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("fake-codex");
+        fs::write(&script, body).expect("write fake codex");
+        let mut permissions = fs::metadata(&script)
+            .expect("script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).expect("chmod");
+        script
+    }
+
+    fn build_codex_test_client(
+        bin: std::path::PathBuf,
+        runtime_dir: std::path::PathBuf,
+        workdir: std::path::PathBuf,
+    ) -> CodexCliModelClient {
+        CodexCliModelClient {
+            bin: bin.to_string_lossy().into_owned(),
+            runtime_dir,
+            workdir,
+            reasoning_effort: "low".to_string(),
+            verbosity: "low".to_string(),
+        }
+    }
+
+    #[test]
+    fn codex_client_complete_returns_trimmed_last_message() {
+        use tempfile::tempdir;
+        let dir = tempdir().expect("tempdir");
+        // Fake codex finds --output-last-message in argv, writes a payload there,
+        // then exits 0. Real codex contract: write the model's last message to
+        // the path passed via --output-last-message.
+        let script = write_fake_codex(
+            dir.path(),
+            concat!(
+                "#!/bin/sh\n",
+                "cat >/dev/null\n",
+                "out=\"\"\n",
+                "while [ \"$#\" -gt 0 ]; do\n",
+                "  if [ \"$1\" = \"--output-last-message\" ]; then\n",
+                "    out=\"$2\"; shift 2; continue\n",
+                "  fi\n",
+                "  shift\n",
+                "done\n",
+                "printf '   hello world   \\n' > \"$out\"\n",
+            ),
+        );
+        let client = build_codex_test_client(
+            script,
+            dir.path().join("runtime"),
+            dir.path().to_path_buf(),
+        );
+        let out = client
+            .complete("ignored", Some("fake-model"))
+            .expect("complete should succeed");
+        assert_eq!(out, "hello world");
+    }
+
+    #[test]
+    fn codex_client_complete_surfaces_subprocess_failure() {
+        use tempfile::tempdir;
+        let dir = tempdir().expect("tempdir");
+        let script = write_fake_codex(
+            dir.path(),
+            concat!(
+                "#!/bin/sh\n",
+                "cat >/dev/null\n",
+                "echo 'codex blew up' >&2\n",
+                "exit 7\n",
+            ),
+        );
+        let client = build_codex_test_client(
+            script,
+            dir.path().join("runtime"),
+            dir.path().to_path_buf(),
+        );
+        let err = client
+            .complete("prompt", Some("fake-model"))
+            .expect_err("should fail when codex exits nonzero");
+        assert!(err.contains("codex exec failed"));
+        assert!(err.contains("codex blew up"));
+    }
+
+    #[test]
+    fn codex_client_complete_errors_on_empty_last_message() {
+        use tempfile::tempdir;
+        let dir = tempdir().expect("tempdir");
+        let script = write_fake_codex(
+            dir.path(),
+            concat!(
+                "#!/bin/sh\n",
+                "cat >/dev/null\n",
+                "out=\"\"\n",
+                "while [ \"$#\" -gt 0 ]; do\n",
+                "  if [ \"$1\" = \"--output-last-message\" ]; then\n",
+                "    out=\"$2\"; shift 2; continue\n",
+                "  fi\n",
+                "  shift\n",
+                "done\n",
+                "printf '   \\n' > \"$out\"\n",
+            ),
+        );
+        let client = build_codex_test_client(
+            script,
+            dir.path().join("runtime"),
+            dir.path().to_path_buf(),
+        );
+        let err = client
+            .complete("prompt", Some("fake-model"))
+            .expect_err("blank message must fail");
+        assert!(err.contains("empty final message"));
+    }
+
+    /// `/usr/bin/true` exits 0 regardless of args, so it stands in for any
+    /// "command is available" probe (`<bin> --version` returning success).
+    const ALWAYS_OK_BIN: &str = "/usr/bin/true";
+
+    fn auto_detect_with_isolated_env(
+        api_key: Option<&str>,
+        claude_bin: &str,
+        codex_bin: &str,
+    ) -> ModelBackend {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let prior_key = std::env::var("OPENROUTER_API_KEY").ok();
+        let prior_claude = std::env::var("CLAWGS_CLAUDE_BIN").ok();
+        let prior_codex = std::env::var("CLAWGS_CODEX_BIN").ok();
+        match api_key {
+            Some(value) => std::env::set_var("OPENROUTER_API_KEY", value),
+            None => std::env::remove_var("OPENROUTER_API_KEY"),
+        }
+        std::env::set_var("CLAWGS_CLAUDE_BIN", claude_bin);
+        std::env::set_var("CLAWGS_CODEX_BIN", codex_bin);
+        let backend = super::auto_detect_model_backend();
+        match prior_key {
+            Some(value) => std::env::set_var("OPENROUTER_API_KEY", value),
+            None => std::env::remove_var("OPENROUTER_API_KEY"),
+        }
+        match prior_claude {
+            Some(value) => std::env::set_var("CLAWGS_CLAUDE_BIN", value),
+            None => std::env::remove_var("CLAWGS_CLAUDE_BIN"),
+        }
+        match prior_codex {
+            Some(value) => std::env::set_var("CLAWGS_CODEX_BIN", value),
+            None => std::env::remove_var("CLAWGS_CODEX_BIN"),
+        }
+        backend
+    }
+
+    #[test]
+    fn auto_detect_prefers_openrouter_when_api_key_set() {
+        let backend = auto_detect_with_isolated_env(
+            Some("any-test-key"),
+            "/nonexistent/claude-zzz",
+            "/nonexistent/codex-zzz",
+        );
+        assert_eq!(backend, ModelBackend::OpenRouter);
+    }
+
+    #[test]
+    fn auto_detect_chooses_claude_when_only_claude_runnable() {
+        let backend =
+            auto_detect_with_isolated_env(None, ALWAYS_OK_BIN, "/nonexistent/codex-zzz");
+        assert_eq!(backend, ModelBackend::ClaudeCli);
+    }
+
+    #[test]
+    fn auto_detect_chooses_codex_when_only_codex_runnable() {
+        let backend =
+            auto_detect_with_isolated_env(None, "/nonexistent/claude-zzz", ALWAYS_OK_BIN);
+        assert_eq!(backend, ModelBackend::CodexCli);
+    }
+
+    #[test]
+    fn auto_detect_falls_back_to_openrouter_when_nothing_available() {
+        let backend = auto_detect_with_isolated_env(
+            None,
+            "/nonexistent/claude-zzz",
+            "/nonexistent/codex-zzz",
+        );
+        assert_eq!(backend, ModelBackend::OpenRouter);
+    }
+
+    #[test]
+    fn validate_backend_credentials_accepts_present_openrouter_key() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let prior = std::env::var("OPENROUTER_API_KEY").ok();
+        std::env::set_var("OPENROUTER_API_KEY", "sk-test-not-real");
+        validate_backend_credentials(ModelBackend::OpenRouter)
+            .expect("present API key should validate");
+        match prior {
+            Some(value) => std::env::set_var("OPENROUTER_API_KEY", value),
+            None => std::env::remove_var("OPENROUTER_API_KEY"),
+        }
+    }
+
+    #[test]
+    fn validate_backend_credentials_accepts_runnable_claude_binary() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let prior = std::env::var("CLAWGS_CLAUDE_BIN").ok();
+        std::env::set_var("CLAWGS_CLAUDE_BIN", ALWAYS_OK_BIN);
+        validate_backend_credentials(ModelBackend::ClaudeCli)
+            .expect("runnable claude bin should validate");
+        match prior {
+            Some(value) => std::env::set_var("CLAWGS_CLAUDE_BIN", value),
+            None => std::env::remove_var("CLAWGS_CLAUDE_BIN"),
+        }
+    }
+
+    #[test]
+    fn validate_backend_credentials_accepts_runnable_codex_binary() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let prior = std::env::var("CLAWGS_CODEX_BIN").ok();
+        std::env::set_var("CLAWGS_CODEX_BIN", ALWAYS_OK_BIN);
+        validate_backend_credentials(ModelBackend::CodexCli)
+            .expect("runnable codex bin should validate");
+        match prior {
+            Some(value) => std::env::set_var("CLAWGS_CODEX_BIN", value),
+            None => std::env::remove_var("CLAWGS_CODEX_BIN"),
+        }
+    }
+
+    #[test]
+    fn codex_cli_client_new_uses_defaults_when_env_unset() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        std::env::remove_var("CLAWGS_CODEX_BIN");
+        std::env::remove_var("CLAWGS_CODEX_REASONING_EFFORT");
+        std::env::remove_var("CLAWGS_CODEX_VERBOSITY");
+        std::env::remove_var("CLAWGS_CODEX_WORKDIR");
+        let client = CodexCliModelClient::new();
+        assert_eq!(client.bin, "codex");
+        assert_eq!(client.reasoning_effort, "low");
+        assert_eq!(client.verbosity, "low");
+        assert!(client.runtime_dir.ends_with("clawgs-codex-exec"));
+    }
+
+    #[test]
+    fn claude_cli_client_new_uses_defaults_when_env_unset() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        std::env::remove_var("CLAWGS_CLAUDE_BIN");
+        std::env::remove_var("CLAWGS_CLAUDE_MAX_BUDGET");
+        let client = ClaudeCliModelClient::new();
+        assert_eq!(client.bin, "claude");
+        assert_eq!(client.max_budget, "0.02");
+        assert!(client.runtime_dir.ends_with("clawgs-claude-exec"));
+    }
+
+    #[test]
+    fn openrouter_request_body_omits_reasoning_block_by_default() {
+        let body = build_openrouter_request_body("hello", "openrouter/free", false);
+        assert_eq!(body["model"], "openrouter/free");
+        assert_eq!(body["max_tokens"], 80);
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][0]["content"], "hello");
+        assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn openrouter_request_body_suppresses_reasoning_when_requested() {
+        let body = build_openrouter_request_body("hi", "x/y", true);
+        assert_eq!(body["reasoning"]["effort"], "none");
+        assert_eq!(body["reasoning"]["exclude"], true);
+    }
+
+    #[test]
+    fn pick_nonempty_or_fallback_returns_primary_when_present() {
+        let result =
+            pick_nonempty_or_fallback(Some("primary".to_string()), || panic!("must not run"));
+        assert_eq!(result.expect("ok"), "primary");
+    }
+
+    #[test]
+    fn pick_nonempty_or_fallback_uses_fallback_when_primary_blank() {
+        let result = pick_nonempty_or_fallback(None, || Some("fallback".to_string()));
+        assert_eq!(result.expect("ok"), "fallback");
+    }
+
+    #[test]
+    fn pick_nonempty_or_fallback_errors_when_both_empty() {
+        let err = pick_nonempty_or_fallback(None, || None).expect_err("must error");
+        assert_eq!(err, "returned empty");
     }
 
     #[test]

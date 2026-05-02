@@ -689,6 +689,28 @@ mod tests {
     }
 
     #[test]
+    fn daemon_inbound_message_type_returns_canonical_strings() {
+        let hello = DaemonInboundMessage::Hello {
+            protocol: "clawgs.emit.v1".to_string(),
+        };
+        assert_eq!(hello.message_type(), HELLO_MESSAGE_TYPE);
+
+        let sync = DaemonInboundMessage::SyncResponse {
+            request_id: "req-1".to_string(),
+            stream_instance_id: None,
+            updates: Vec::new(),
+        };
+        assert_eq!(sync.message_type(), SYNC_RESPONSE_MESSAGE_TYPE);
+
+        let error = DaemonInboundMessage::Error {
+            code: "boom".to_string(),
+            message: "kapow".to_string(),
+            request_id: None,
+        };
+        assert_eq!(error.message_type(), "error");
+    }
+
+    #[test]
     fn config_validation_accepts_defaults() {
         let cfg = ThoughtConfig::default();
         assert!(cfg.validate().is_ok());

@@ -140,7 +140,9 @@ impl ModelClient for OpenRouterModelClient {
             .map_err(|_| "OPENROUTER_API_KEY not set".to_string())?;
         complete_with_models(
             &candidate_models(model_override, ModelBackend::OpenRouter),
-            |model| nonempty_openrouter_response(&self.client, &self.chat_url, prompt, model, &api_key),
+            |model| {
+                nonempty_openrouter_response(&self.client, &self.chat_url, prompt, model, &api_key)
+            },
         )
     }
 }
@@ -616,8 +618,8 @@ fn interpret_openrouter_response(
         let preview: String = body_text.chars().take(500).collect();
         return Err(format!("{status}: {preview}"));
     }
-    let body: serde_json::Value = serde_json::from_str(&body_text)
-        .map_err(|error| format!("json parse failed: {error}"))?;
+    let body: serde_json::Value =
+        serde_json::from_str(&body_text).map_err(|error| format!("json parse failed: {error}"))?;
     Ok(extract_openrouter_content(&body))
 }
 
@@ -712,7 +714,6 @@ mod tests {
         validated_codex_setting, ClaudeCliModelClient, CodexCliModelClient, ModelBackend,
         ModelClient, OpenRouterModelClient, REASONING_EFFORT_ALLOWED, VERBOSITY_ALLOWED,
     };
-
 
     #[test]
     fn thought_models_prefers_override() {
@@ -1103,11 +1104,8 @@ mod tests {
                 "printf '   hello world   \\n' > \"$out\"\n",
             ),
         );
-        let client = build_codex_test_client(
-            script,
-            dir.path().join("runtime"),
-            dir.path().to_path_buf(),
-        );
+        let client =
+            build_codex_test_client(script, dir.path().join("runtime"), dir.path().to_path_buf());
         let out = client
             .complete("ignored", Some("fake-model"))
             .expect("complete should succeed");
@@ -1127,11 +1125,8 @@ mod tests {
                 "exit 7\n",
             ),
         );
-        let client = build_codex_test_client(
-            script,
-            dir.path().join("runtime"),
-            dir.path().to_path_buf(),
-        );
+        let client =
+            build_codex_test_client(script, dir.path().join("runtime"), dir.path().to_path_buf());
         let err = client
             .complete("prompt", Some("fake-model"))
             .expect_err("should fail when codex exits nonzero");
@@ -1158,11 +1153,8 @@ mod tests {
                 "printf '   \\n' > \"$out\"\n",
             ),
         );
-        let client = build_codex_test_client(
-            script,
-            dir.path().join("runtime"),
-            dir.path().to_path_buf(),
-        );
+        let client =
+            build_codex_test_client(script, dir.path().join("runtime"), dir.path().to_path_buf());
         let err = client
             .complete("prompt", Some("fake-model"))
             .expect_err("blank message must fail");
@@ -1173,33 +1165,35 @@ mod tests {
     /// "command is available" probe (`<bin> --version` returning success).
     const ALWAYS_OK_BIN: &str = "/usr/bin/true";
 
+    /// Apply `value` to env var `key`, restoring nothing — the caller does
+    /// that. `Some("")` is treated like any other value; only `None` removes.
+    fn override_env(key: &str, value: Option<&str>) {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+
     fn auto_detect_with_isolated_env(
         api_key: Option<&str>,
         claude_bin: &str,
         codex_bin: &str,
     ) -> ModelBackend {
         let _lock = lock_env();
-        let prior_key = std::env::var("OPENROUTER_API_KEY").ok();
-        let prior_claude = std::env::var("CLAWGS_CLAUDE_BIN").ok();
-        let prior_codex = std::env::var("CLAWGS_CODEX_BIN").ok();
-        match api_key {
-            Some(value) => std::env::set_var("OPENROUTER_API_KEY", value),
-            None => std::env::remove_var("OPENROUTER_API_KEY"),
-        }
+        let priors: [(&str, Option<String>); 3] = [
+            (
+                "OPENROUTER_API_KEY",
+                std::env::var("OPENROUTER_API_KEY").ok(),
+            ),
+            ("CLAWGS_CLAUDE_BIN", std::env::var("CLAWGS_CLAUDE_BIN").ok()),
+            ("CLAWGS_CODEX_BIN", std::env::var("CLAWGS_CODEX_BIN").ok()),
+        ];
+        override_env("OPENROUTER_API_KEY", api_key);
         std::env::set_var("CLAWGS_CLAUDE_BIN", claude_bin);
         std::env::set_var("CLAWGS_CODEX_BIN", codex_bin);
         let backend = super::auto_detect_model_backend();
-        match prior_key {
-            Some(value) => std::env::set_var("OPENROUTER_API_KEY", value),
-            None => std::env::remove_var("OPENROUTER_API_KEY"),
-        }
-        match prior_claude {
-            Some(value) => std::env::set_var("CLAWGS_CLAUDE_BIN", value),
-            None => std::env::remove_var("CLAWGS_CLAUDE_BIN"),
-        }
-        match prior_codex {
-            Some(value) => std::env::set_var("CLAWGS_CODEX_BIN", value),
-            None => std::env::remove_var("CLAWGS_CODEX_BIN"),
+        for (key, prior) in &priors {
+            override_env(key, prior.as_deref());
         }
         backend
     }
@@ -1216,15 +1210,13 @@ mod tests {
 
     #[test]
     fn auto_detect_chooses_claude_when_only_claude_runnable() {
-        let backend =
-            auto_detect_with_isolated_env(None, ALWAYS_OK_BIN, "/nonexistent/codex-zzz");
+        let backend = auto_detect_with_isolated_env(None, ALWAYS_OK_BIN, "/nonexistent/codex-zzz");
         assert_eq!(backend, ModelBackend::ClaudeCli);
     }
 
     #[test]
     fn auto_detect_chooses_codex_when_only_codex_runnable() {
-        let backend =
-            auto_detect_with_isolated_env(None, "/nonexistent/claude-zzz", ALWAYS_OK_BIN);
+        let backend = auto_detect_with_isolated_env(None, "/nonexistent/claude-zzz", ALWAYS_OK_BIN);
         assert_eq!(backend, ModelBackend::CodexCli);
     }
 
@@ -1479,7 +1471,9 @@ mod tests {
             http_close_response("HTTP/1.1 500 Internal Server Error", "boom-503"),
         ]);
         let client = OpenRouterModelClient::with_chat_url(url).expect("client");
-        let err = client.complete("hi", None).expect_err("must propagate failure");
+        let err = client
+            .complete("hi", None)
+            .expect_err("must propagate failure");
         assert!(err.contains("all models failed"));
         assert!(err.contains("500"));
 

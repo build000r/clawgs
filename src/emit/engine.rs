@@ -52,10 +52,7 @@ fn session_needs_clear(
     runtime_state_needs_clear(state, next_rest_state) || session_carries_dirty_signal(session)
 }
 
-fn runtime_state_needs_clear(
-    state: &SessionRuntimeState,
-    next_rest_state: RestState,
-) -> bool {
+fn runtime_state_needs_clear(state: &SessionRuntimeState, next_rest_state: RestState) -> bool {
     state.last_emitted_thought.is_some()
         || state.thought_state != ThoughtState::Holding
         || state.rest_state != next_rest_state
@@ -1698,7 +1695,10 @@ fn context_focus_fingerprint(snapshot: &Snapshot, state: &SessionState) -> u64 {
     push_normalized_focus_part(
         &mut parts,
         "now",
-        snapshot.current_tool.as_ref().map(|tool| tool.tool.as_str()),
+        snapshot
+            .current_tool
+            .as_ref()
+            .map(|tool| tool.tool.as_str()),
     );
 
     let recent_tools = recent_focus_tools(snapshot);
@@ -1994,7 +1994,10 @@ mod tests {
         };
         let result = engine.sync(&request);
 
-        assert!(result.updates.is_empty(), "no LLM emits when client init fails");
+        assert!(
+            result.updates.is_empty(),
+            "no LLM emits when client init fails"
+        );
         assert_eq!(result.metrics.llm_calls, 0);
         assert!(
             result

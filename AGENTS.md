@@ -18,7 +18,7 @@
 - Parse fixture: `cargo run -- extract --tool codex --input tests/fixtures/codex-sample.jsonl --pretty`.
 - Stdio daemon: `cargo run -- emit --stdio`.
 - Tmux one-shot scan: `cargo run -- tmux-emit --once`.
-- Release process: no CI/release workflow was found; README says crates.io is the only published channel. Verify version/tag/token steps before `cargo publish`.
+- Release process: `RELEASE.md` documents the manual release contract, and `.github/workflows/release.yml` verifies tag builds before publishing to crates.io. Verify `CARGO_REGISTRY_TOKEN`, the crate version, and tag name before `cargo publish`.
 
 ## Layout
 - `src/parsers/`: Claude/Codex JSONL parsing plus shared JSONL/truncation/action helpers.

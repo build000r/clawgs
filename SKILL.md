@@ -1,6 +1,6 @@
 ---
 name: clawgs
-description: Extract structured JSON from Claude Code and Codex JSONL session logs and run a reusable thought-emission daemon over stdio. Use when asked to parse agent transcripts, normalize .jsonl sessions, auto-discover current Claude/Codex logs by cwd, or generate thought updates from live session snapshots for downstream tools.
+description: Extract clawgs.v2 JSON from Claude Code and Codex JSONL session logs and run the clawgs.emit.v2 thought-emission daemon over stdio. Use when asked to parse agent transcripts, normalize .jsonl sessions, auto-discover current Claude/Codex logs by cwd, or generate thought updates from live session snapshots for downstream tools.
 license: MIT
 ---
 
@@ -91,3 +91,11 @@ Output shape:
 ## Output Contract
 
 Schema version is `clawgs.v2`. Full field definitions and sample output are in [references/schema-v2.md](references/schema-v2.md).
+
+## Release Metadata
+
+Current crate release target: `0.2.0`.
+
+- `0.2.0` is the canonical `clawgs.v2` / `clawgs.emit.v2` schema and protocol release.
+- Release history is tracked in [CHANGELOG.md](CHANGELOG.md).
+- Tag and crates.io publish steps are tracked in [RELEASE.md](RELEASE.md).

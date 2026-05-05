@@ -4,6 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/build000r/clawgs/blob/main/LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
+[![crates.io](https://img.shields.io/crates/v/clawgs.svg)](https://crates.io/crates/clawgs)
 [![Protocol](https://img.shields.io/badge/protocol-clawgs.emit.v2-blue.svg)](https://github.com/build000r/clawgs/blob/main/references/emit-protocol-v2.md)
 
 </div>
@@ -369,6 +370,14 @@ target/release/clawgs tmux-emit --once
 - `tmux-emit` and `tmux-notify` are Unix/tmux-centric; they are not a cross-platform pane abstraction.
 - crates.io is the only published distribution channel so far; Homebrew, npm, PyPI, and a curl installer are not wired up yet.
 - Live thought emission can use external backends if you choose them; the repo does not pretend those calls are offline.
+
+## Release Process
+
+`clawgs` publishes through crates.io. Release history lives in
+[CHANGELOG.md](CHANGELOG.md), and the tag/publish contract lives in
+[RELEASE.md](RELEASE.md). The GitHub Actions release workflow verifies format,
+clippy, tests, package contents, and `cargo publish --dry-run` before publishing
+tagged `v*.*.*` releases with `CARGO_REGISTRY_TOKEN`.
 
 ## FAQ
 

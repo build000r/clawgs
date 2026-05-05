@@ -14,6 +14,8 @@ keywords = ["claude", "codex", "jsonl", "transcripts", "cli"]
 categories = ["command-line-utilities", "parser-implementations", "development-tools"]
 exclude = [
     "target/",
+    ".github/",
+    "CHANGELOG_RESEARCH.md",
     "refactor/",
     ".mutate/",
     "mutants.out/",

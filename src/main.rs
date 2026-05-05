@@ -31,7 +31,7 @@ struct Cli {
 enum Commands {
     /// Show built-in Claude/Codex transcripts and the snapshots they produce — no local logs or credentials needed.
     Demo(DemoArgs),
-    /// Normalize a Claude or Codex JSONL transcript into a `clawgs.v1` JSON snapshot on stdout.
+    /// Normalize a Claude or Codex JSONL transcript into a `clawgs.v2` JSON snapshot on stdout.
     Extract(ExtractArgs),
     /// Run the live emit protocol daemon (NDJSON over stdio); requires `--stdio`.
     Emit(EmitArgs),
@@ -151,7 +151,7 @@ struct TmuxEmitArgs {
     #[arg(long, default_value = "")]
     model: String,
 
-    /// Inline JSON-encoded `ThoughtConfig` (see references/emit-protocol-v1.md). Omitting it uses defaults.
+    /// Inline JSON-encoded `ThoughtConfig` (see references/emit-protocol-v2.md). Omitting it uses defaults.
     #[arg(long)]
     config_json: Option<String>,
 
@@ -355,7 +355,25 @@ fn sync_response_for_line(
             error.to_string(),
         )
     })?;
+    validate_request_action_cues(&request)
+        .map_err(|error| ErrorMessage::new(Some(request.id.clone()), "invalid_request", error))?;
     Ok(engine.sync(&request))
+}
+
+fn validate_request_action_cues(request: &SyncRequest) -> std::result::Result<(), String> {
+    for session in &request.sessions {
+        for (idx, cue) in session.action_cues.iter().enumerate() {
+            if !cue.is_valid() {
+                return Err(format!(
+                    "invalid action_cues[{idx}] for session {}: evidence must exactly match kind {}",
+                    session.session_id,
+                    cue.kind.as_str()
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 enum EmitLineResult {

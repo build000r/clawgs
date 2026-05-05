@@ -114,7 +114,7 @@ fn tmux_emit_once_writes_hello_and_sync_result() {
 
     let hello: Value = serde_json::from_str(lines.next().expect("hello line")).expect("hello json");
     assert_eq!(hello["type"], "hello");
-    assert_eq!(hello["protocol"], "clawgs.emit.v1");
+    assert_eq!(hello["protocol"], "clawgs.emit.v2");
 
     let result: Value =
         serde_json::from_str(lines.next().expect("sync result line")).expect("result json");

@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
 use crate::{
-    discover_claude_paths, discover_codex_paths, extract, resolve_input, Action, AgentTool,
-    ExtractOptions, Snapshot, ToolSelection,
+    discover_claude_paths, discover_codex_paths, extract, resolve_input, Action, ActionCue,
+    ActionCueKind, AgentTool, ExtractOptions, Snapshot, ToolSelection,
 };
 
 use super::model_client::{
@@ -57,10 +57,11 @@ fn runtime_state_needs_clear(state: &SessionRuntimeState, next_rest_state: RestS
         || state.thought_state != ThoughtState::Holding
         || state.rest_state != next_rest_state
         || state.commit_candidate
+        || !state.action_cues.is_empty()
 }
 
 fn session_carries_dirty_signal(session: &SessionSnapshot) -> bool {
-    session.thought.is_some() || session.commit_candidate
+    session.thought.is_some() || session.commit_candidate || !session.action_cues.is_empty()
 }
 
 /// Tally `(tool, cwd)` group occurrences across the session list. Returned
@@ -90,6 +91,7 @@ struct SessionRuntimeState {
     thought_source: ThoughtSource,
     rest_state: RestState,
     commit_candidate: bool,
+    action_cues: Vec<ActionCue>,
     objective_fingerprint: Option<String>,
     objective_stable_since: DateTime<Utc>,
     claimed_jsonl_path: Option<PathBuf>,
@@ -123,6 +125,7 @@ impl SessionRuntimeState {
             thought_source: session.thought_source,
             rest_state: session.rest_state,
             commit_candidate: session.commit_candidate,
+            action_cues: session.action_cues.clone(),
             objective_fingerprint: session.objective_fingerprint.clone(),
             objective_stable_since: thought_updated_at,
             claimed_jsonl_path: None,
@@ -171,6 +174,7 @@ struct PreparedSessionContext {
     context_source: ContextSource,
     next_rest_state: RestState,
     next_commit_candidate: bool,
+    next_action_cues: Vec<ActionCue>,
     objective_fingerprint: String,
     objective_changed: bool,
 }
@@ -229,7 +233,12 @@ impl EmitEngine {
         if let Err(err) = self.ensure_client(backend) {
             metrics.last_backend_error = Some(err.message);
             if err.allow_carry_forward {
-                self.carry_forward_sessions(request, &mut metrics);
+                self.carry_forward_sessions(
+                    request,
+                    &transcript_group_counts,
+                    &mut updates,
+                    &mut metrics,
+                );
             }
             return self.build_sync_result(&request.id, updates, metrics);
         }
@@ -300,7 +309,14 @@ impl EmitEngine {
         }
     }
 
-    fn carry_forward_sessions(&mut self, request: &SyncRequest, metrics: &mut SyncMetrics) {
+    fn carry_forward_sessions(
+        &mut self,
+        request: &SyncRequest,
+        transcript_group_counts: &HashMap<String, usize>,
+        updates: &mut Vec<ThoughtUpdate>,
+        metrics: &mut SyncMetrics,
+    ) {
+        let stream_instance_id = self.stream_instance_id.clone();
         for session in &request.sessions {
             metrics.sessions_seen += 1;
             metrics.suppressed += 1;
@@ -310,7 +326,45 @@ impl EmitEngine {
                 .or_insert_with(|| {
                     SessionRuntimeState::initialize_from_session(session, request.now)
                 });
-            state.rest_state = rest_state_for_session(session, None, request.now);
+
+            if handle_exited_session(
+                &stream_instance_id,
+                state,
+                session,
+                &request.config,
+                request.now,
+                updates,
+                metrics,
+            ) {
+                continue;
+            }
+
+            invalidate_stale_claim(state, session);
+            let (context_snapshot, resolved_path) = context_snapshot_for_session_with_claim(
+                session,
+                state.claimed_jsonl_path.as_deref(),
+                transcript_group_is_ambiguous(session, transcript_group_counts),
+            );
+            let context_source = context_source_for_snapshot(context_snapshot.as_ref());
+            store_resolved_claim(state, session, resolved_path);
+            let next_rest_state =
+                rest_state_for_session(session, context_snapshot.as_ref(), request.now);
+            let next_commit_candidate =
+                commit_candidate_for_context(context_snapshot.as_ref(), session);
+            let next_action_cues = action_cues_for_context(context_snapshot.as_ref(), session);
+
+            emit_passive_state_change_if_needed(
+                updates,
+                &stream_instance_id,
+                state,
+                session,
+                &request.config,
+                context_source,
+                next_rest_state,
+                next_commit_candidate,
+                &next_action_cues,
+                request.now,
+            );
         }
     }
 
@@ -328,7 +382,7 @@ impl EmitEngine {
                 .or_insert_with(|| {
                     SessionRuntimeState::initialize_from_session(session, request.now)
                 });
-            let next_rest_state = rest_state_for_session(session, None, request.now);
+            let next_rest_state = clear_rest_state_for_session(session, request.now);
 
             if session_needs_clear(state, session, next_rest_state) {
                 updates.push(clear_thought_update(
@@ -340,6 +394,7 @@ impl EmitEngine {
                     request.now,
                     next_rest_state,
                     false,
+                    &[],
                     state.objective_fingerprint.clone(),
                 ));
                 state.last_emitted_thought = None;
@@ -347,6 +402,7 @@ impl EmitEngine {
                 state.thought_source = ThoughtSource::CarryForward;
                 state.rest_state = next_rest_state;
                 state.commit_candidate = false;
+                state.action_cues.clear();
                 state.sleeping_emitted = false;
             } else {
                 metrics.suppressed += 1;
@@ -382,6 +438,48 @@ fn store_resolved_claim(
     state.claimed_jsonl_path = resolved_path;
 }
 
+fn handle_exited_session(
+    stream_instance_id: &str,
+    state: &mut SessionRuntimeState,
+    session: &SessionSnapshot,
+    config: &ThoughtConfig,
+    now: DateTime<Utc>,
+    updates: &mut Vec<ThoughtUpdate>,
+    metrics: &mut SyncMetrics,
+) -> bool {
+    if !session.exited && session.state != SessionState::Exited {
+        return false;
+    }
+
+    let next_rest_state = RestState::DeepSleep;
+    if runtime_state_needs_clear(state, next_rest_state) || session_carries_dirty_signal(session) {
+        updates.push(clear_thought_update(
+            stream_instance_id,
+            state,
+            session,
+            config,
+            ContextSource::Terminal,
+            now,
+            next_rest_state,
+            false,
+            &[],
+            state.objective_fingerprint.clone(),
+        ));
+        state.last_emitted_thought = None;
+        state.thought_state = ThoughtState::Holding;
+        state.thought_source = ThoughtSource::CarryForward;
+        state.rest_state = next_rest_state;
+        state.commit_candidate = false;
+        state.action_cues.clear();
+        state.sleeping_emitted = false;
+        state.last_terminal_context = Some(trim_terminal_context(&session.replay_text));
+    } else {
+        metrics.suppressed += 1;
+    }
+
+    true
+}
+
 fn process_session(
     model_client: &dyn ModelClient,
     stream_instance_id: &str,
@@ -394,14 +492,21 @@ fn process_session(
 ) {
     metrics.sessions_seen += 1;
 
-    if session.exited {
-        metrics.suppressed += 1;
-        return;
-    }
-
     let state = per_session
         .entry(session.session_id.clone())
         .or_insert_with(|| SessionRuntimeState::initialize_from_session(session, request.now));
+
+    if handle_exited_session(
+        stream_instance_id,
+        state,
+        session,
+        &request.config,
+        request.now,
+        updates,
+        metrics,
+    ) {
+        return;
+    }
 
     invalidate_stale_claim(state, session);
 
@@ -413,7 +518,8 @@ fn process_session(
     let context_source = context_source_for_snapshot(context_snapshot.as_ref());
     store_resolved_claim(state, session, resolved_path);
     let next_rest_state = rest_state_for_session(session, context_snapshot.as_ref(), request.now);
-    let next_commit_candidate = commit_candidate_for_context(context_snapshot.as_ref());
+    let next_commit_candidate = commit_candidate_for_context(context_snapshot.as_ref(), session);
+    let next_action_cues = action_cues_for_context(context_snapshot.as_ref(), session);
 
     if handle_sleeping_session(
         stream_instance_id,
@@ -425,6 +531,7 @@ fn process_session(
         request.now,
         next_rest_state,
         next_commit_candidate,
+        &next_action_cues,
         updates,
         metrics,
     ) {
@@ -440,17 +547,22 @@ fn process_session(
         request.now,
         next_rest_state,
         next_commit_candidate,
+        &next_action_cues,
         updates,
     );
 
     let Some(prepared) = prepare_session_context(
+        stream_instance_id,
         state,
         session,
+        &request.config,
         request.now,
         context_snapshot,
         context_source,
         next_rest_state,
         next_commit_candidate,
+        next_action_cues,
+        updates,
         metrics,
     ) else {
         return;
@@ -468,6 +580,7 @@ fn process_session(
         request.now,
         prepared.next_rest_state,
         prepared.next_commit_candidate,
+        &prepared.next_action_cues,
         updates,
         metrics,
     ) {
@@ -495,6 +608,7 @@ fn wake_from_sleep_if_needed(
     now: DateTime<Utc>,
     next_rest_state: RestState,
     next_commit_candidate: bool,
+    next_action_cues: &[ActionCue],
     updates: &mut Vec<ThoughtUpdate>,
 ) -> bool {
     if state.thought_state != ThoughtState::Sleeping {
@@ -513,28 +627,47 @@ fn wake_from_sleep_if_needed(
         now,
         next_rest_state,
         next_commit_candidate,
+        next_action_cues,
         state.objective_fingerprint.clone(),
     ));
     state.thought_state = ThoughtState::Holding;
     state.thought_source = ThoughtSource::CarryForward;
     state.rest_state = next_rest_state;
     state.commit_candidate = next_commit_candidate;
+    state.action_cues = next_action_cues.to_vec();
     state.sleeping_emitted = false;
     state.last_emitted_thought = None;
     true
 }
 
 fn prepare_session_context(
+    stream_instance_id: &str,
     state: &mut SessionRuntimeState,
     session: &SessionSnapshot,
+    config: &ThoughtConfig,
     now: DateTime<Utc>,
     context_snapshot: Option<Snapshot>,
     context_source: ContextSource,
     next_rest_state: RestState,
     next_commit_candidate: bool,
+    next_action_cues: Vec<ActionCue>,
+    updates: &mut Vec<ThoughtUpdate>,
     metrics: &mut SyncMetrics,
 ) -> Option<PreparedSessionContext> {
-    if suppress_for_initial_context(state, session, context_snapshot.as_ref(), metrics) {
+    if suppress_for_initial_context(
+        stream_instance_id,
+        state,
+        session,
+        config,
+        context_source,
+        now,
+        context_snapshot.as_ref(),
+        next_rest_state,
+        next_commit_candidate,
+        &next_action_cues,
+        updates,
+        metrics,
+    ) {
         return None;
     }
 
@@ -547,6 +680,7 @@ fn prepare_session_context(
         context_source,
         next_rest_state,
         next_commit_candidate,
+        next_action_cues,
         objective_fingerprint,
         objective_changed,
     })
@@ -586,13 +720,38 @@ fn emit_session_thought(
     let Some(raw_thought) =
         complete_session_thought(model_client, &prompt, request, session, state, metrics)
     else {
+        emit_passive_state_change_if_needed(
+            updates,
+            stream_instance_id,
+            state,
+            session,
+            &request.config,
+            prepared.context_source,
+            prepared.next_rest_state,
+            prepared.next_commit_candidate,
+            &prepared.next_action_cues,
+            request.now,
+        );
         return;
     };
     metrics.llm_calls += 1;
 
     let thought = sanitize_thought_text(&raw_thought);
     if thought.is_empty() {
-        metrics.suppressed += 1;
+        if !emit_passive_state_change_if_needed(
+            updates,
+            stream_instance_id,
+            state,
+            session,
+            &request.config,
+            prepared.context_source,
+            prepared.next_rest_state,
+            prepared.next_commit_candidate,
+            &prepared.next_action_cues,
+            request.now,
+        ) {
+            metrics.suppressed += 1;
+        }
         return;
     }
 
@@ -606,6 +765,7 @@ fn emit_session_thought(
         prepared.context_source,
         prepared.next_rest_state,
         prepared.next_commit_candidate,
+        &prepared.next_action_cues,
         request.now,
         metrics,
     ) {
@@ -680,6 +840,7 @@ fn handle_duplicate_generated_thought(
     context_source: ContextSource,
     next_rest_state: RestState,
     next_commit_candidate: bool,
+    next_action_cues: &[ActionCue],
     now: DateTime<Utc>,
     metrics: &mut SyncMetrics,
 ) -> bool {
@@ -696,6 +857,7 @@ fn handle_duplicate_generated_thought(
         context_source,
         next_rest_state,
         next_commit_candidate,
+        next_action_cues,
         now,
     ) {
         return true;
@@ -730,6 +892,7 @@ fn publish_generated_thought(
         Some(prepared.objective_fingerprint.clone()),
         prepared.next_rest_state,
         prepared.next_commit_candidate,
+        &prepared.next_action_cues,
         config,
         prepared.context_source,
     ));
@@ -744,6 +907,7 @@ fn publish_generated_thought(
     state.thought_source = ThoughtSource::Llm;
     state.rest_state = prepared.next_rest_state;
     state.commit_candidate = prepared.next_commit_candidate;
+    state.action_cues = prepared.next_action_cues.clone();
     state.sleeping_emitted = false;
     state.last_terminal_context = Some(trim_terminal_context(&session.replay_text));
 }
@@ -770,12 +934,14 @@ fn sleeping_emit_needed(
     state: &SessionRuntimeState,
     next_rest_state: RestState,
     next_commit_candidate: bool,
+    next_action_cues: &[ActionCue],
     carried_thought: &Option<String>,
 ) -> bool {
     state.thought_state != ThoughtState::Sleeping
         || !state.sleeping_emitted
         || state.rest_state != next_rest_state
         || state.commit_candidate != next_commit_candidate
+        || state.action_cues.as_slice() != next_action_cues
         || state.last_emitted_thought != *carried_thought
 }
 
@@ -789,6 +955,7 @@ fn handle_sleeping_session(
     now: DateTime<Utc>,
     next_rest_state: RestState,
     next_commit_candidate: bool,
+    next_action_cues: &[ActionCue],
     updates: &mut Vec<ThoughtUpdate>,
     metrics: &mut SyncMetrics,
 ) -> bool {
@@ -802,6 +969,7 @@ fn handle_sleeping_session(
         state,
         next_rest_state,
         next_commit_candidate,
+        next_action_cues,
         &carried_thought,
     );
     let token_count = token_count_for_context(context_snapshot, session);
@@ -822,6 +990,7 @@ fn handle_sleeping_session(
             state.objective_fingerprint.clone(),
             next_rest_state,
             next_commit_candidate,
+            next_action_cues,
             config,
             context_source,
         ));
@@ -834,21 +1003,49 @@ fn handle_sleeping_session(
     state.thought_source = carried_source;
     state.rest_state = next_rest_state;
     state.commit_candidate = next_commit_candidate;
+    state.action_cues = next_action_cues.to_vec();
     state.last_emitted_thought = carried_thought;
     state.last_terminal_context = Some(trim_terminal_context(&session.replay_text));
     true
 }
 
 fn suppress_for_initial_context(
+    stream_instance_id: &str,
     state: &mut SessionRuntimeState,
     session: &SessionSnapshot,
+    config: &ThoughtConfig,
+    context_source: ContextSource,
+    now: DateTime<Utc>,
     context_snapshot: Option<&Snapshot>,
+    next_rest_state: RestState,
+    next_commit_candidate: bool,
+    next_action_cues: &[ActionCue],
+    updates: &mut Vec<ThoughtUpdate>,
     metrics: &mut SyncMetrics,
 ) -> bool {
     if is_initial_thought_candidate(state, session)
-        && !has_adequate_initial_context(context_snapshot, &session.replay_text)
+        && !has_adequate_initial_context(
+            context_snapshot,
+            &session.replay_text,
+            next_commit_candidate,
+            next_action_cues,
+        )
     {
         state.last_terminal_context = Some(trim_terminal_context(&session.replay_text));
+        if emit_passive_state_change_if_needed(
+            updates,
+            stream_instance_id,
+            state,
+            session,
+            config,
+            context_source,
+            next_rest_state,
+            next_commit_candidate,
+            next_action_cues,
+            now,
+        ) {
+            return true;
+        }
         metrics.suppressed += 1;
         return true;
     }
@@ -881,6 +1078,7 @@ fn clear_thought_update(
     now: DateTime<Utc>,
     rest_state: RestState,
     commit_candidate: bool,
+    action_cues: &[ActionCue],
     objective_fingerprint: Option<String>,
 ) -> ThoughtUpdate {
     thought_update(
@@ -897,6 +1095,7 @@ fn clear_thought_update(
         objective_fingerprint,
         rest_state,
         commit_candidate,
+        action_cues,
         config,
         context_source,
     )
@@ -911,32 +1110,70 @@ fn emit_passive_state_change_if_needed(
     context_source: ContextSource,
     next_rest_state: RestState,
     next_commit_candidate: bool,
+    next_action_cues: &[ActionCue],
     now: DateTime<Utc>,
 ) -> bool {
-    if state.rest_state == next_rest_state && state.commit_candidate == next_commit_candidate {
+    let first_observation_has_visible_state = state.emission_seq == 0
+        && state.last_emitted_thought.is_none()
+        && (next_commit_candidate || !next_action_cues.is_empty());
+    if state.rest_state == next_rest_state
+        && state.commit_candidate == next_commit_candidate
+        && state.action_cues.as_slice() == next_action_cues
+        && !first_observation_has_visible_state
+    {
         return false;
     }
 
+    let (thought_state, thought_source, thought) =
+        passive_state_payload(state, session, next_rest_state);
     updates.push(thought_update(
         stream_instance_id,
         state,
         session,
-        current_thought_for_update(state, session),
+        thought.clone(),
         session.token_count,
         session.context_limit,
-        state.thought_state,
-        state.thought_source,
+        thought_state,
+        thought_source,
         false,
         now,
         state.objective_fingerprint.clone(),
         next_rest_state,
         next_commit_candidate,
+        next_action_cues,
         config,
         context_source,
     ));
+    state.thought_state = thought_state;
+    state.thought_source = thought_source;
     state.rest_state = next_rest_state;
     state.commit_candidate = next_commit_candidate;
+    state.action_cues = next_action_cues.to_vec();
+    state.last_emitted_thought = thought;
+    state.sleeping_emitted = is_sleeping_rest_state(next_rest_state);
     true
+}
+
+fn passive_state_payload(
+    state: &SessionRuntimeState,
+    session: &SessionSnapshot,
+    next_rest_state: RestState,
+) -> (ThoughtState, ThoughtSource, Option<String>) {
+    if is_sleeping_rest_state(next_rest_state) {
+        (
+            ThoughtState::Sleeping,
+            state.thought_source,
+            current_thought_for_update(state, session),
+        )
+    } else if state.thought_state == ThoughtState::Sleeping {
+        (ThoughtState::Holding, ThoughtSource::CarryForward, None)
+    } else {
+        (
+            state.thought_state,
+            state.thought_source,
+            current_thought_for_update(state, session),
+        )
+    }
 }
 
 fn current_thought_for_update(
@@ -975,6 +1212,7 @@ fn thought_update(
     objective_fingerprint: Option<String>,
     rest_state: RestState,
     commit_candidate: bool,
+    action_cues: &[ActionCue],
     config: &ThoughtConfig,
     context_source: ContextSource,
 ) -> ThoughtUpdate {
@@ -993,6 +1231,7 @@ fn thought_update(
         objective_fingerprint,
         rest_state,
         commit_candidate,
+        action_cues: action_cues.to_vec(),
         timing: Some(timing_info_for_update(state, session, at)),
         cues: Some(cue_info_for_update(state, config, at, context_source)),
     }
@@ -1008,6 +1247,11 @@ fn rest_state_for_session(
         _ if context_snapshot.is_some_and(|snapshot| snapshot.awaiting_user_input) => {
             RestState::Sleeping
         }
+        _ if context_snapshot.is_none()
+            && valid_action_cues_contain(&session.action_cues, ActionCueKind::AwaitingUser) =>
+        {
+            RestState::Sleeping
+        }
         (false, SessionState::Idle | SessionState::Attention) => {
             idle_rest_state((now - session.last_activity_at).num_milliseconds().max(0))
         }
@@ -1015,11 +1259,61 @@ fn rest_state_for_session(
     }
 }
 
-fn commit_candidate_for_context(context_snapshot: Option<&Snapshot>) -> bool {
+fn commit_candidate_for_context(
+    context_snapshot: Option<&Snapshot>,
+    session: &SessionSnapshot,
+) -> bool {
+    if session.exited || session.state == SessionState::Exited {
+        return false;
+    }
+
+    match context_snapshot {
+        Some(snapshot) => snapshot
+            .commit_signal
+            .as_ref()
+            .is_some_and(|signal| signal.candidate),
+        None => {
+            session.commit_candidate
+                || valid_action_cues_contain(&session.action_cues, ActionCueKind::CommitReady)
+        }
+    }
+}
+
+fn action_cues_for_context(
+    context_snapshot: Option<&Snapshot>,
+    session: &SessionSnapshot,
+) -> Vec<ActionCue> {
+    if session.exited || session.state == SessionState::Exited {
+        return Vec::new();
+    }
+
     context_snapshot
-        .and_then(|snapshot| snapshot.commit_signal.as_ref())
-        .map(|signal| signal.candidate)
-        .unwrap_or(false)
+        .map(|snapshot| snapshot.action_cues.clone())
+        .unwrap_or_else(|| valid_action_cues(&session.action_cues))
+}
+
+fn valid_action_cues(action_cues: &[ActionCue]) -> Vec<ActionCue> {
+    action_cues
+        .iter()
+        .filter(|cue| cue.is_valid())
+        .cloned()
+        .collect()
+}
+
+fn valid_action_cues_contain(action_cues: &[ActionCue], kind: ActionCueKind) -> bool {
+    action_cues
+        .iter()
+        .any(|cue| cue.kind == kind && cue.is_valid())
+}
+
+fn clear_rest_state_for_session(session: &SessionSnapshot, now: DateTime<Utc>) -> RestState {
+    match (session.exited, &session.state) {
+        (true, _) | (_, SessionState::Exited) => RestState::DeepSleep,
+        (false, SessionState::Idle | SessionState::Attention) => {
+            idle_rest_state((now - session.last_activity_at).num_milliseconds().max(0))
+        }
+        _ => RestState::Active,
+    }
 }
 
 fn idle_rest_state(idle_ms: i64) -> RestState {
@@ -1072,6 +1366,7 @@ fn suppress_for_cadence_or_terminal_delta(
     now: DateTime<Utc>,
     next_rest_state: RestState,
     next_commit_candidate: bool,
+    next_action_cues: &[ActionCue],
     updates: &mut Vec<ThoughtUpdate>,
     metrics: &mut SyncMetrics,
 ) -> bool {
@@ -1085,6 +1380,7 @@ fn suppress_for_cadence_or_terminal_delta(
             context_source,
             next_rest_state,
             next_commit_candidate,
+            next_action_cues,
             now,
             metrics,
         );
@@ -1106,6 +1402,7 @@ fn suppress_for_cadence_or_terminal_delta(
             context_source,
             next_rest_state,
             next_commit_candidate,
+            next_action_cues,
             now,
             metrics,
         );
@@ -1123,6 +1420,7 @@ fn suppress_with_passive_state_change(
     context_source: ContextSource,
     next_rest_state: RestState,
     next_commit_candidate: bool,
+    next_action_cues: &[ActionCue],
     now: DateTime<Utc>,
     metrics: &mut SyncMetrics,
 ) -> bool {
@@ -1135,6 +1433,7 @@ fn suppress_with_passive_state_change(
         context_source,
         next_rest_state,
         next_commit_candidate,
+        next_action_cues,
         now,
     ) {
         true
@@ -1331,12 +1630,19 @@ fn context_snapshot_for_session_with_claim(
 }
 
 fn is_initial_thought_candidate(state: &SessionRuntimeState, session: &SessionSnapshot) -> bool {
-    state.emission_seq == 0 && state.last_emitted_thought.is_none() && session.thought.is_none()
+    state.emission_seq == 0 && session.thought.is_none()
 }
 
-fn has_adequate_initial_context(context_snapshot: Option<&Snapshot>, replay_text: &str) -> bool {
+fn has_adequate_initial_context(
+    context_snapshot: Option<&Snapshot>,
+    replay_text: &str,
+    next_commit_candidate: bool,
+    next_action_cues: &[ActionCue],
+) -> bool {
     context_snapshot.is_some_and(snapshot_has_meaningful_context)
         || has_meaningful_terminal_delta(replay_text, None)
+        || next_commit_candidate
+        || !next_action_cues.is_empty()
 }
 
 fn snapshot_has_meaningful_context(snapshot: &Snapshot) -> bool {
@@ -1889,6 +2195,42 @@ mod tests {
             last_activity_at: now,
             rest_state: RestState::Active,
             commit_candidate: false,
+            action_cues: Vec::new(),
+        }
+    }
+
+    fn awaiting_user_cue() -> crate::ActionCue {
+        crate::ActionCue {
+            kind: crate::ActionCueKind::AwaitingUser,
+            status: crate::ActionCueStatus::Active,
+            source: crate::ActionCueSource::Transcript,
+            confidence: crate::ActionCueConfidence::Deterministic,
+            evidence: vec!["awaiting_user_input".to_string()],
+        }
+    }
+
+    fn commit_ready_cue() -> crate::ActionCue {
+        crate::ActionCue {
+            kind: crate::ActionCueKind::CommitReady,
+            status: crate::ActionCueStatus::Active,
+            source: crate::ActionCueSource::Transcript,
+            confidence: crate::ActionCueConfidence::Deterministic,
+            evidence: vec![
+                "edit_seen".to_string(),
+                "validation_succeeded".to_string(),
+                "dirty_tree_checked_after_latest_edit".to_string(),
+                "commit_not_seen_after_latest_edit".to_string(),
+            ],
+        }
+    }
+
+    fn invalid_awaiting_user_cue() -> crate::ActionCue {
+        crate::ActionCue {
+            kind: crate::ActionCueKind::AwaitingUser,
+            status: crate::ActionCueStatus::Active,
+            source: crate::ActionCueSource::Transcript,
+            confidence: crate::ActionCueConfidence::Deterministic,
+            evidence: Vec::new(),
         }
     }
 
@@ -1914,6 +2256,211 @@ mod tests {
         assert_eq!(result.updates[0].thought_source, ThoughtSource::Llm);
         assert!(!result.stream_instance_id.is_empty());
         assert_eq!(result.metrics.llm_calls, 1);
+    }
+
+    #[test]
+    fn inbound_action_cues_carry_without_transcript_context() {
+        let now = Utc::now();
+        let mut engine = mock_engine("investigating failing auth tests");
+        let mut session = sample_session(now);
+        session.commit_candidate = true;
+        session.action_cues = vec![commit_ready_cue()];
+
+        let request = SyncRequest {
+            id: "req-1".to_string(),
+            now,
+            config: ThoughtConfig::default(),
+            sessions: vec![session],
+        };
+
+        let result = engine.sync(&request);
+
+        assert_eq!(result.updates.len(), 1);
+        assert!(result.updates[0].commit_candidate);
+        assert_eq!(result.updates[0].action_cues, vec![commit_ready_cue()]);
+    }
+
+    #[test]
+    fn transcript_without_commit_signal_clears_inbound_commit_candidate() {
+        let now = Utc::now();
+        let mut session = sample_session(now);
+        session.commit_candidate = true;
+        let context = Snapshot {
+            user_task: Some("Claude task".to_string()),
+            current_tool: None,
+            token_count: 42,
+            awaiting_user_input: false,
+            awaiting_user_text: None,
+            recent_actions: Vec::new(),
+            commit_signal: None,
+            action_cues: Vec::new(),
+        };
+
+        assert!(!commit_candidate_for_context(Some(&context), &session));
+    }
+
+    #[test]
+    fn first_inbound_awaiting_user_cue_sleeps_without_model_call() {
+        let now = Utc::now();
+        let mut engine = failing_engine("model backend offline");
+        let mut session = sample_session(now);
+        session.replay_text = "sh".to_string();
+        session.action_cues = vec![awaiting_user_cue()];
+
+        let result = engine.sync(&SyncRequest {
+            id: "req-inbound-fail".to_string(),
+            now,
+            config: ThoughtConfig::default(),
+            sessions: vec![session],
+        });
+
+        assert_eq!(result.updates.len(), 1);
+        assert_eq!(result.metrics.llm_calls, 0);
+        assert_eq!(result.updates[0].action_cues, vec![awaiting_user_cue()]);
+        assert_eq!(result.updates[0].rest_state, RestState::Sleeping);
+        assert!(result.metrics.last_backend_error.is_none());
+    }
+
+    #[test]
+    fn first_inbound_commit_candidate_emits_when_model_fails() {
+        let now = Utc::now();
+        let mut engine = failing_engine("model backend offline");
+        let mut session = sample_session(now);
+        session.replay_text = "sh".to_string();
+        session.commit_candidate = true;
+
+        let result = engine.sync(&SyncRequest {
+            id: "req-inbound-commit-fail".to_string(),
+            now,
+            config: ThoughtConfig::default(),
+            sessions: vec![session],
+        });
+
+        assert_eq!(result.updates.len(), 1);
+        assert!(result.updates[0].commit_candidate);
+        assert!(result.updates[0].action_cues.is_empty());
+        assert_eq!(
+            result.metrics.last_backend_error.as_deref(),
+            Some("model backend offline")
+        );
+    }
+
+    #[test]
+    fn inbound_awaiting_user_cue_sets_sleeping_rest_state_without_transcript() {
+        let now = Utc::now();
+        let mut session = sample_session(now);
+        session.action_cues = vec![awaiting_user_cue()];
+
+        assert_eq!(
+            rest_state_for_session(&session, None, now),
+            RestState::Sleeping
+        );
+    }
+
+    #[test]
+    fn invalid_inbound_action_cues_are_not_treated_as_facts() {
+        let now = Utc::now();
+        let mut session = sample_session(now);
+        session.action_cues = vec![invalid_awaiting_user_cue()];
+
+        assert_eq!(action_cues_for_context(None, &session), Vec::new());
+        assert_eq!(
+            rest_state_for_session(&session, None, now),
+            RestState::Active
+        );
+    }
+
+    #[test]
+    fn initial_context_suppression_emits_passive_clear_for_stale_inbound_cues() {
+        let now = Utc::now();
+        let mut session = sample_session(now);
+        session.replay_text = "$ ".to_string();
+        session.commit_candidate = true;
+        session.action_cues = vec![commit_ready_cue()];
+        let mut state = SessionRuntimeState::initialize_from_session(&session, now);
+        let context = Snapshot {
+            user_task: None,
+            current_tool: None,
+            token_count: 0,
+            awaiting_user_input: false,
+            awaiting_user_text: None,
+            recent_actions: Vec::new(),
+            commit_signal: Some(crate::CommitSignal::default()),
+            action_cues: Vec::new(),
+        };
+        let mut updates = Vec::new();
+        let mut metrics = SyncMetrics::default();
+
+        let suppressed = suppress_for_initial_context(
+            "stream-test",
+            &mut state,
+            &session,
+            &ThoughtConfig::default(),
+            ContextSource::Transcript,
+            now,
+            Some(&context),
+            RestState::Active,
+            false,
+            &[],
+            &mut updates,
+            &mut metrics,
+        );
+
+        assert!(suppressed);
+        assert_eq!(updates.len(), 1);
+        assert!(!updates[0].commit_candidate);
+        assert!(updates[0].action_cues.is_empty());
+        assert!(!state.commit_candidate);
+        assert!(state.action_cues.is_empty());
+    }
+
+    #[test]
+    fn inbound_commit_ready_cue_sets_legacy_commit_candidate_without_transcript() {
+        let now = Utc::now();
+        let mut session = sample_session(now);
+        session.commit_candidate = false;
+        session.action_cues = vec![commit_ready_cue()];
+
+        assert!(commit_candidate_for_context(None, &session));
+    }
+
+    #[test]
+    fn exited_session_clears_visible_action_cues_after_model_failure() {
+        let now = Utc::now();
+        let mut engine = failing_engine("model backend offline");
+        let mut active = sample_session(now);
+        active.replay_text = "sh".to_string();
+        active.commit_candidate = true;
+        active.action_cues = vec![commit_ready_cue()];
+
+        let first = engine.sync(&SyncRequest {
+            id: "req-active".to_string(),
+            now,
+            config: ThoughtConfig::default(),
+            sessions: vec![active.clone()],
+        });
+        assert_eq!(first.updates.len(), 1);
+        assert!(first.updates[0].commit_candidate);
+        assert_eq!(first.updates[0].action_cues, vec![commit_ready_cue()]);
+
+        let mut exited = active;
+        exited.state = SessionState::Exited;
+        exited.exited = true;
+        exited.commit_candidate = false;
+        exited.action_cues.clear();
+
+        let second = engine.sync(&SyncRequest {
+            id: "req-exited".to_string(),
+            now: now + Duration::seconds(1),
+            config: ThoughtConfig::default(),
+            sessions: vec![exited],
+        });
+
+        assert_eq!(second.updates.len(), 1);
+        assert_eq!(second.updates[0].rest_state, RestState::DeepSleep);
+        assert!(!second.updates[0].commit_candidate);
+        assert!(second.updates[0].action_cues.is_empty());
+        assert!(second.updates[0].thought.is_none());
     }
 
     #[test]
@@ -1963,6 +2510,56 @@ mod tests {
             Some("codex exec failed: not authenticated")
         );
         assert!(result.metrics.suppressed > 0);
+    }
+
+    #[test]
+    fn model_failure_still_emits_action_cue_state_change() {
+        let temp = tempdir().expect("tempdir");
+        let transcript = temp.path().join("cue-only.jsonl");
+        fs::write(
+            &transcript,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/project\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Ship preview-first widget fix\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"status\":\"completed\",\"name\":\"apply_patch\",\"call_id\":\"call_patch\",\"input\":\"*** Begin Patch\\n*** Update File: /tmp/project/src/widget.tsx\\n@@\\n-old\\n+new\\n*** End Patch\\n\"}}\n"
+            ),
+        )
+        .expect("write transcript");
+
+        let now = Utc::now();
+        let mut engine = failing_engine("model backend offline");
+        let mut session = sample_session(now);
+        session.tool = Some("codex".to_string());
+        session.cwd = "/tmp/project".to_string();
+
+        engine.per_session.insert(
+            session.session_id.clone(),
+            SessionRuntimeState::initialize_from_session(&session, now),
+        );
+        engine
+            .per_session
+            .get_mut(&session.session_id)
+            .expect("state")
+            .claimed_jsonl_path = Some(transcript);
+
+        let result = engine.sync(&SyncRequest {
+            id: "req-cue-only".to_string(),
+            now,
+            config: ThoughtConfig::default(),
+            sessions: vec![session],
+        });
+
+        assert_eq!(result.updates.len(), 1);
+        assert_eq!(result.metrics.llm_calls, 0);
+        assert_eq!(
+            result.updates[0].action_cues[0].kind,
+            crate::ActionCueKind::ValidationMissingAfterEdit
+        );
+        assert!(!result.updates[0].commit_candidate);
+        assert_eq!(
+            result.metrics.last_backend_error.as_deref(),
+            Some("model backend offline")
+        );
     }
 
     #[test]
@@ -2020,6 +2617,159 @@ mod tests {
         match prior_codex {
             Some(value) => std::env::set_var("CLAWGS_CODEX_BIN", value),
             None => std::env::remove_var("CLAWGS_CODEX_BIN"),
+        }
+    }
+
+    #[test]
+    fn credential_failure_still_emits_action_cue_state_change() {
+        let _lock = lock_env();
+        let prior_claude = std::env::var("CLAWGS_CLAUDE_BIN").ok();
+        std::env::set_var("CLAWGS_CLAUDE_BIN", "/nonexistent/claude-zzz");
+
+        let temp = tempdir().expect("tempdir");
+        let transcript = temp.path().join("cue-only.jsonl");
+        fs::write(
+            &transcript,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/project\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Ship preview-first widget fix\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"status\":\"completed\",\"name\":\"apply_patch\",\"call_id\":\"call_patch\",\"input\":\"*** Begin Patch\\n*** Update File: /tmp/project/src/widget.tsx\\n@@\\n-old\\n+new\\n*** End Patch\\n\"}}\n"
+            ),
+        )
+        .expect("write transcript");
+
+        let now = Utc::now();
+        let mut engine = mock_engine("ignored");
+        let mut session = sample_session(now);
+        session.tool = Some("codex".to_string());
+        session.cwd = "/tmp/project".to_string();
+
+        engine.per_session.insert(
+            session.session_id.clone(),
+            SessionRuntimeState::initialize_from_session(&session, now),
+        );
+        engine
+            .per_session
+            .get_mut(&session.session_id)
+            .expect("state")
+            .claimed_jsonl_path = Some(transcript);
+
+        let result = engine.sync(&SyncRequest {
+            id: "req-credential-cue".to_string(),
+            now,
+            config: ThoughtConfig {
+                backend: "claude".to_string(),
+                ..ThoughtConfig::default()
+            },
+            sessions: vec![session],
+        });
+
+        assert_eq!(result.updates.len(), 1);
+        assert_eq!(result.metrics.llm_calls, 0);
+        assert!(
+            result
+                .metrics
+                .last_backend_error
+                .as_deref()
+                .is_some_and(|err| err.starts_with("claude:") && err.contains("not found")),
+            "expected claude credential error, got {:?}",
+            result.metrics.last_backend_error
+        );
+        assert_eq!(
+            result.updates[0].action_cues[0].kind,
+            crate::ActionCueKind::ValidationMissingAfterEdit
+        );
+
+        match prior_claude {
+            Some(value) => std::env::set_var("CLAWGS_CLAUDE_BIN", value),
+            None => std::env::remove_var("CLAWGS_CLAUDE_BIN"),
+        }
+    }
+
+    #[test]
+    fn credential_failure_emits_first_inbound_action_cue() {
+        let _lock = lock_env();
+        let prior_claude = std::env::var("CLAWGS_CLAUDE_BIN").ok();
+        std::env::set_var("CLAWGS_CLAUDE_BIN", "/nonexistent/claude-zzz");
+
+        let now = Utc::now();
+        let mut engine = mock_engine("ignored");
+        let mut session = sample_session(now);
+        session.replay_text = "sh".to_string();
+        session.action_cues = vec![awaiting_user_cue()];
+
+        let result = engine.sync(&SyncRequest {
+            id: "req-credential-inbound-cue".to_string(),
+            now,
+            config: ThoughtConfig {
+                backend: "claude".to_string(),
+                ..ThoughtConfig::default()
+            },
+            sessions: vec![session],
+        });
+
+        assert_eq!(result.updates.len(), 1);
+        assert_eq!(result.metrics.llm_calls, 0);
+        assert!(
+            result
+                .metrics
+                .last_backend_error
+                .as_deref()
+                .is_some_and(|err| err.starts_with("claude:") && err.contains("not found")),
+            "expected claude credential error, got {:?}",
+            result.metrics.last_backend_error
+        );
+        assert_eq!(result.updates[0].action_cues, vec![awaiting_user_cue()]);
+        assert_eq!(result.updates[0].rest_state, RestState::Sleeping);
+        assert_eq!(result.updates[0].thought_state, ThoughtState::Sleeping);
+
+        match prior_claude {
+            Some(value) => std::env::set_var("CLAWGS_CLAUDE_BIN", value),
+            None => std::env::remove_var("CLAWGS_CLAUDE_BIN"),
+        }
+    }
+
+    #[test]
+    fn credential_failure_wake_clears_stale_sleeping_thought() {
+        let _lock = lock_env();
+        let prior_claude = std::env::var("CLAWGS_CLAUDE_BIN").ok();
+        std::env::set_var("CLAWGS_CLAUDE_BIN", "/nonexistent/claude-zzz");
+
+        let now = Utc::now();
+        let mut engine = mock_engine("ignored");
+        let mut session = sample_session(now);
+        session.thought = Some("Waiting on your confirmation.".to_string());
+        session.thought_state = ThoughtState::Sleeping;
+        session.rest_state = RestState::Sleeping;
+        engine.per_session.insert(
+            session.session_id.clone(),
+            SessionRuntimeState::initialize_from_session(&session, now),
+        );
+
+        let mut resumed = session;
+        resumed.thought = None;
+        resumed.thought_state = ThoughtState::Holding;
+        resumed.rest_state = RestState::Active;
+        resumed.replay_text = "cargo test resumed after user input".to_string();
+
+        let result = engine.sync(&SyncRequest {
+            id: "req-credential-wake".to_string(),
+            now,
+            config: ThoughtConfig {
+                backend: "claude".to_string(),
+                ..ThoughtConfig::default()
+            },
+            sessions: vec![resumed],
+        });
+
+        assert_eq!(result.updates.len(), 1);
+        assert!(result.updates[0].thought.is_none());
+        assert_eq!(result.updates[0].rest_state, RestState::Active);
+        assert_eq!(result.updates[0].thought_state, ThoughtState::Holding);
+
+        match prior_claude {
+            Some(value) => std::env::set_var("CLAWGS_CLAUDE_BIN", value),
+            None => std::env::remove_var("CLAWGS_CLAUDE_BIN"),
         }
     }
 
@@ -2113,6 +2863,7 @@ mod tests {
             awaiting_user_text: Some("Need your approval to continue.".to_string()),
             recent_actions: Vec::new(),
             commit_signal: None,
+            action_cues: Vec::new(),
         };
 
         assert_eq!(
@@ -2138,7 +2889,9 @@ mod tests {
             awaiting_user_text: Some("Need your decision on the migration.".to_string()),
             recent_actions: Vec::new(),
             commit_signal: None,
+            action_cues: Vec::new(),
         };
+        let action_cues = vec![awaiting_user_cue()];
 
         let handled = handle_sleeping_session(
             "stream-a",
@@ -2150,6 +2903,7 @@ mod tests {
             now,
             RestState::Sleeping,
             false,
+            &action_cues,
             &mut updates,
             &mut metrics,
         );
@@ -2167,6 +2921,7 @@ mod tests {
         assert_eq!(updates[0].thought_state, ThoughtState::Sleeping);
         assert_eq!(updates[0].thought_source, ThoughtSource::CarryForward);
         assert_eq!(updates[0].rest_state, RestState::Sleeping);
+        assert_eq!(updates[0].action_cues, action_cues);
         let timing = updates[0].timing.as_ref().expect("timing");
         assert_eq!(timing.run_finished_at, Some(now));
     }
@@ -2191,6 +2946,7 @@ mod tests {
             now,
             RestState::Sleeping,
             false,
+            &[],
             &mut updates,
             &mut metrics,
         );
@@ -2238,6 +2994,29 @@ mod tests {
     }
 
     #[test]
+    fn disabled_config_clears_awaiting_user_cue_without_sleep_mismatch() {
+        let now = Utc::now();
+        let mut engine = mock_engine("unused");
+
+        let mut session = sample_session(now);
+        session.action_cues = vec![awaiting_user_cue()];
+
+        let result = engine.sync(&SyncRequest {
+            id: "req-disabled-cue".to_string(),
+            now,
+            config: ThoughtConfig {
+                enabled: false,
+                ..ThoughtConfig::default()
+            },
+            sessions: vec![session],
+        });
+
+        assert_eq!(result.updates.len(), 1);
+        assert_eq!(result.updates[0].rest_state, RestState::Active);
+        assert!(result.updates[0].action_cues.is_empty());
+    }
+
+    #[test]
     fn duplicate_thought_still_emits_commit_candidate_change() {
         let cwd = PathBuf::from("/tmp/project");
         let temp = tempdir().expect("tempdir");
@@ -2270,7 +3049,9 @@ mod tests {
                 "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"git status --short\\\"}\",\"call_id\":\"call_status\"}}\n",
                 "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"status\":\"completed\",\"name\":\"apply_patch\",\"call_id\":\"call_patch\",\"input\":\"*** Begin Patch\\n*** Update File: /tmp/project/src/widget.tsx\\n@@\\n-old\\n+new\\n*** End Patch\\n\"}}\n",
                 "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"cargo test --manifest-path clawgs/Cargo.toml codex -- --nocapture\\\"}\",\"call_id\":\"call_validate\"}}\n",
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_validate\",\"output\":\"Chunk ID: abc123\\nWall time: 0.0100 seconds\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\nvalidation passed\\n\"}}\n"
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_validate\",\"output\":\"Chunk ID: abc123\\nWall time: 0.0100 seconds\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\nvalidation passed\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"git status --short\\\"}\",\"call_id\":\"call_fresh_status\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_fresh_status\",\"output\":\"Chunk ID: status\\nWall time: 0.0100 seconds\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\n M src/widget.tsx\\n\"}}\n"
             ),
         )
         .expect("rewrite transcript");
@@ -2291,6 +3072,10 @@ mod tests {
             Some("stabilizing preview widget behavior")
         );
         assert!(second.updates[0].commit_candidate);
+        assert_eq!(
+            second.updates[0].action_cues[0].kind,
+            crate::ActionCueKind::CommitReady
+        );
         assert_eq!(second.updates[0].emission_seq, Some(2));
     }
 
@@ -2385,6 +3170,7 @@ mod tests {
             now,
             RestState::Sleeping,
             false,
+            &[],
             &mut first_updates,
             &mut first_metrics,
         );
@@ -2403,6 +3189,7 @@ mod tests {
             now + Duration::seconds(1),
             RestState::Sleeping,
             false,
+            &[],
             &mut second_updates,
             &mut second_metrics,
         );
@@ -2864,9 +3651,11 @@ mod tests {
         state.thought_state = ThoughtState::Holding;
         state.rest_state = RestState::Active;
         state.commit_candidate = false;
+        state.action_cues.clear();
         let mut idle_session = session.clone();
         idle_session.thought = None;
         idle_session.commit_candidate = false;
+        idle_session.action_cues.clear();
         assert!(!session_needs_clear(
             &state,
             &idle_session,
@@ -2881,6 +3670,7 @@ mod tests {
         let mut clean_session = session.clone();
         clean_session.thought = None;
         clean_session.commit_candidate = false;
+        clean_session.action_cues.clear();
 
         // last_emitted_thought was set by a prior tick.
         let mut state = SessionRuntimeState::initialize_from_session(&session, now);
@@ -2919,6 +3709,16 @@ mod tests {
             &commit_session,
             RestState::Active
         ));
+
+        // action_cues are also visible state that a disabled engine must clear.
+        let base_state = SessionRuntimeState::initialize_from_session(&session, now);
+        let mut cue_session = clean_session.clone();
+        cue_session.action_cues = vec![awaiting_user_cue()];
+        assert!(session_needs_clear(
+            &base_state,
+            &cue_session,
+            RestState::Active
+        ));
     }
 
     #[test]
@@ -2933,11 +3733,19 @@ mod tests {
             sessions: vec![session.clone()],
         };
         let mut metrics = SyncMetrics::default();
+        let mut updates = Vec::new();
+        let transcript_group_counts = HashMap::new();
 
-        engine.carry_forward_sessions(&request, &mut metrics);
+        engine.carry_forward_sessions(
+            &request,
+            &transcript_group_counts,
+            &mut updates,
+            &mut metrics,
+        );
 
         assert_eq!(metrics.sessions_seen, 1);
         assert_eq!(metrics.suppressed, 1);
+        assert!(updates.is_empty());
         assert!(
             engine.per_session.contains_key(&session.session_id),
             "carry-forward must initialize per-session state for unknown sessions"

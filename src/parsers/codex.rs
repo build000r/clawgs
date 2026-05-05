@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::Result;
@@ -26,6 +26,8 @@ pub(crate) fn parse(path: &Path, options: &ExtractOptions) -> Result<ParseSnapsh
     let mut awaiting_user_text: Option<String> = None;
     let mut pending_validation_commands: HashMap<String, String> = HashMap::new();
     let mut pending_validation_sessions: HashMap<String, String> = HashMap::new();
+    let mut pending_dirty_check_commands: HashSet<String> = HashSet::new();
+    let mut pending_commit_commands: HashSet<String> = HashSet::new();
     let mut commit_signal = CommitSignal::default();
 
     for entry in &parsed.entries {
@@ -38,6 +40,8 @@ pub(crate) fn parse(path: &Path, options: &ExtractOptions) -> Result<ParseSnapsh
             function_call_observation(entry, options, &ts),
             &mut pending_validation_commands,
             &mut pending_validation_sessions,
+            &mut pending_dirty_check_commands,
+            &mut pending_commit_commands,
             &mut commit_signal,
             &mut recent_actions,
             &mut current_tool,
@@ -47,16 +51,20 @@ pub(crate) fn parse(path: &Path, options: &ExtractOptions) -> Result<ParseSnapsh
             custom_tool_call_observation(entry, options, &ts),
             &mut pending_validation_commands,
             &mut pending_validation_sessions,
+            &mut pending_dirty_check_commands,
+            &mut pending_commit_commands,
             &mut commit_signal,
             &mut recent_actions,
             &mut current_tool,
             options.max_actions,
         );
 
-        update_validation_signal(
+        update_command_output_signals(
             entry,
             &mut pending_validation_commands,
             &mut pending_validation_sessions,
+            &mut pending_dirty_check_commands,
+            &mut pending_commit_commands,
             &mut commit_signal,
         );
 
@@ -480,6 +488,8 @@ fn observe_and_record(
     observation: Option<ToolCallObservation>,
     pending_validation_commands: &mut HashMap<String, String>,
     pending_validation_sessions: &mut HashMap<String, String>,
+    pending_dirty_check_commands: &mut HashSet<String>,
+    pending_commit_commands: &mut HashSet<String>,
     commit_signal: &mut CommitSignal,
     recent_actions: &mut Vec<Action>,
     current_tool: &mut Option<Action>,
@@ -492,6 +502,8 @@ fn observe_and_record(
         &observation,
         pending_validation_commands,
         pending_validation_sessions,
+        pending_dirty_check_commands,
+        pending_commit_commands,
         commit_signal,
     );
     record_action(
@@ -506,15 +518,21 @@ fn observe_tool_call(
     observation: &ToolCallObservation,
     pending_validation_commands: &mut HashMap<String, String>,
     pending_validation_sessions: &mut HashMap<String, String>,
+    pending_dirty_check_commands: &mut HashSet<String>,
+    pending_commit_commands: &mut HashSet<String>,
     commit_signal: &mut CommitSignal,
 ) {
     if observation.marks_edit {
         commit_signal.edited = true;
-        // A new edit invalidates any prior "validated" signal: the new bytes
-        // have not been tested yet, so commit_candidate must require fresh
-        // validation. Without this reset, edit -> test -> edit again would
-        // still report candidate=true and falsely cue a "ready to commit".
+        // A new edit invalidates prior validation, dirty-tree, commit, and
+        // pending validation evidence: the new bytes need fresh observations.
         commit_signal.validated = false;
+        commit_signal.dirty_checked = false;
+        commit_signal.commit_seen = false;
+        pending_validation_commands.clear();
+        pending_validation_sessions.clear();
+        pending_dirty_check_commands.clear();
+        pending_commit_commands.clear();
     }
 
     match observation.action.tool.as_str() {
@@ -523,9 +541,12 @@ fn observe_tool_call(
             pending_validation_commands,
             pending_validation_sessions,
         ),
-        "exec_command" => {
-            observe_exec_command(observation, pending_validation_commands, commit_signal)
-        }
+        "exec_command" => observe_exec_command(
+            observation,
+            pending_validation_commands,
+            pending_dirty_check_commands,
+            pending_commit_commands,
+        ),
         _ => {}
     }
 }
@@ -550,29 +571,37 @@ fn carry_pending_validation_to_call(
 fn observe_exec_command(
     observation: &ToolCallObservation,
     pending_validation_commands: &mut HashMap<String, String>,
-    commit_signal: &mut CommitSignal,
+    pending_dirty_check_commands: &mut HashSet<String>,
+    pending_commit_commands: &mut HashSet<String>,
 ) {
     let Some(command) = observation.command.as_deref() else {
         return;
     };
 
+    let call_id = observation.call_id.as_deref();
     if dirty_check_command(command) {
-        commit_signal.dirty_checked = true;
+        if let Some(call_id) = call_id {
+            pending_dirty_check_commands.insert(call_id.to_string());
+        }
     }
     if commit_command(command) {
-        commit_signal.commit_seen = true;
+        if let Some(call_id) = call_id {
+            pending_commit_commands.insert(call_id.to_string());
+        }
     }
     if validation_command(command) {
-        if let Some(call_id) = observation.call_id.as_deref() {
+        if let Some(call_id) = call_id {
             pending_validation_commands.insert(call_id.to_string(), command.to_string());
         }
     }
 }
 
-fn update_validation_signal(
+fn update_command_output_signals(
     entry: &Value,
     pending_validation_commands: &mut HashMap<String, String>,
     pending_validation_sessions: &mut HashMap<String, String>,
+    pending_dirty_check_commands: &mut HashSet<String>,
+    pending_commit_commands: &mut HashSet<String>,
     commit_signal: &mut CommitSignal,
 ) {
     let Some(payload) = response_item_payload(entry, "function_call_output") else {
@@ -581,13 +610,21 @@ fn update_validation_signal(
     let Some(call_id) = payload.get("call_id").and_then(Value::as_str) else {
         return;
     };
-    let Some(command) = pending_validation_commands.remove(call_id) else {
-        return;
-    };
     let output = payload
         .get("output")
         .and_then(Value::as_str)
         .unwrap_or_default();
+
+    if pending_dirty_check_commands.remove(call_id) && successful_command_output(output) {
+        commit_signal.dirty_checked = true;
+    }
+    if pending_commit_commands.remove(call_id) && successful_command_output(output) {
+        commit_signal.commit_seen = true;
+    }
+
+    let Some(command) = pending_validation_commands.remove(call_id) else {
+        return;
+    };
     if validation_command(&command) && successful_command_output(output) {
         commit_signal.validated = true;
     } else if let Some(session_id) = running_session_id_from_output(output) {
@@ -665,12 +702,17 @@ fn dirty_check_command(command: &str) -> bool {
     trimmed == "git status"
         || trimmed.starts_with("git status ")
         || trimmed == "git diff"
-        || trimmed.starts_with("git diff ")
+        || (trimmed.starts_with("git diff ") && !command_has_arg(trimmed, "--check"))
 }
 
 fn commit_command(command: &str) -> bool {
     let trimmed = command.trim();
-    trimmed == "git commit" || trimmed.starts_with("git commit ")
+    (trimmed == "git commit" || trimmed.starts_with("git commit "))
+        && !command_has_arg(trimmed, "--dry-run")
+}
+
+fn command_has_arg(command: &str, arg: &str) -> bool {
+    command.split_whitespace().any(|token| token == arg)
 }
 
 fn validation_command(command: &str) -> bool {
@@ -710,9 +752,16 @@ fn validation_command(command: &str) -> bool {
         "pyright",
     ]
     .iter()
-    .any(|prefix| normalized.starts_with(prefix))
+    .any(|prefix| command_starts_with_word(&normalized, prefix))
         || make_validation_command(&normalized)
         || xcodebuild_validation_command(&normalized)
+}
+
+fn command_starts_with_word(command: &str, prefix: &str) -> bool {
+    command == prefix
+        || command
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
 }
 
 fn make_validation_command(normalized: &str) -> bool {
@@ -723,21 +772,30 @@ fn make_validation_command(normalized: &str) -> bool {
                 "test",
                 "check",
                 "build",
-                "build-",
                 "lint",
                 "verify",
                 "typecheck",
                 "type-check",
             ]
             .iter()
-            .any(|prefix| target.starts_with(prefix))
+            .any(|target_name| make_target_matches(target, target_name))
         })
         .unwrap_or(false)
 }
 
+fn make_target_matches(target: &str, target_name: &str) -> bool {
+    target == target_name
+        || target
+            .strip_prefix(target_name)
+            .is_some_and(|rest| rest.starts_with(char::is_whitespace) || rest.starts_with('-'))
+}
+
 fn xcodebuild_validation_command(normalized: &str) -> bool {
-    normalized.starts_with("xcodebuild")
-        && (normalized.contains(" test") || normalized.contains(" build"))
+    command_starts_with_word(normalized, "xcodebuild")
+        && normalized
+            .split_whitespace()
+            .skip(1)
+            .any(|token| matches!(token, "test" | "build"))
 }
 
 fn successful_command_output(output: &str) -> bool {
@@ -748,14 +806,20 @@ fn successful_command_output(output: &str) -> bool {
     // Match the exit line only inside the metadata header so command stdout
     // that happens to print "Process exited with code 0" cannot forge a
     // validation pass when the command actually failed.
-    let header = output.split("\nOutput:\n").next().unwrap_or(output);
+    let Some(header) = command_output_header(output) else {
+        return false;
+    };
     header
         .lines()
         .any(|line| line.trim() == "Process exited with code 0")
 }
 
+fn command_output_header(output: &str) -> Option<&str> {
+    output.split_once("\nOutput:\n").map(|(header, _)| header)
+}
+
 fn running_session_id_from_output(output: &str) -> Option<String> {
-    output.lines().find_map(|line| {
+    command_output_header(output)?.lines().find_map(|line| {
         line.trim()
             .strip_prefix("Process running with session ID ")
             .map(ToString::to_string)
@@ -1054,7 +1118,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_codex_current_shapes_preserve_task_and_commit_candidate() {
+    fn parse_codex_current_shapes_preserve_task_and_commit_signal() {
         let file = NamedTempFile::new().expect("temp file");
         fs::write(
             file.path(),
@@ -1089,10 +1153,10 @@ mod tests {
         assert_eq!(
             snapshot.commit_signal,
             Some(CommitSignal {
-                candidate: true,
+                candidate: false,
                 edited: true,
                 validated: true,
-                dirty_checked: true,
+                dirty_checked: false,
                 commit_seen: false,
             })
         );
@@ -1124,8 +1188,8 @@ mod tests {
 
         assert!(signal.edited, "second edit should still mark edited");
         assert!(
-            signal.dirty_checked,
-            "git status earlier should still count"
+            !signal.dirty_checked,
+            "dirty checks before the latest edit must not count"
         );
         assert!(
             !signal.validated,
@@ -1166,8 +1230,20 @@ mod tests {
         assert!(dirty_check_command("git diff --cached"));
         assert!(dirty_check_command("git diff HEAD"));
         assert!(dirty_check_command("  git diff  "));
+        assert!(!dirty_check_command("git diff --check"));
+        assert!(!dirty_check_command("git diff --cached --check"));
         assert!(!dirty_check_command("git diffstat"));
         assert!(!dirty_check_command("git log"));
+    }
+
+    #[test]
+    fn commit_command_ignores_dry_run() {
+        assert!(commit_command("git commit"));
+        assert!(commit_command("git commit -m ready"));
+        assert!(commit_command("git commit --amend --no-edit"));
+        assert!(!commit_command("git commit --dry-run"));
+        assert!(!commit_command("git commit --dry-run -m ready"));
+        assert!(!commit_command("git status"));
     }
 
     #[test]
@@ -1186,6 +1262,20 @@ mod tests {
         // outside the framed envelope.
         let unframed = "Process exited with code 0 (in some random log)";
         assert!(!successful_command_output(unframed));
+        let exact_unframed = "Process exited with code 0";
+        assert!(!successful_command_output(exact_unframed));
+    }
+
+    #[test]
+    fn running_session_id_only_trusts_metadata_header() {
+        let header_session = "Chunk ID: abc\nWall time: 0.01s\nProcess running with session ID 42\nOriginal token count: 12\nOutput:\n\n";
+        assert_eq!(
+            running_session_id_from_output(header_session).as_deref(),
+            Some("42")
+        );
+
+        let stdout_forgery = "Chunk ID: abc\nWall time: 0.01s\nProcess exited with code 1\nOriginal token count: 12\nOutput:\n\nProcess running with session ID 42\n";
+        assert_eq!(running_session_id_from_output(stdout_forgery), None);
     }
 
     #[test]
@@ -1197,7 +1287,48 @@ mod tests {
         assert!(validation_command("xcodebuild -scheme Etcha test"));
         assert!(validation_command("xcodebuild -scheme Etcha build"));
         assert!(!validation_command("make docs"));
+        assert!(!validation_command("make testdata"));
+        assert!(!validation_command("xcodebuildish -scheme Etcha test"));
+        assert!(!validation_command("xcodebuild-wrapper -scheme Etcha test"));
+        assert!(!validation_command(
+            "xcodebuild -list -project TestApp.xcodeproj"
+        ));
+        assert!(!validation_command("xcodebuild -showBuildSettings"));
         assert!(!validation_command("xcodebuild -list"));
+        assert!(!validation_command("cargo testish"));
+        assert!(!validation_command("pytestfoo"));
+    }
+
+    #[test]
+    fn parse_codex_failed_validation_stdout_cannot_seed_running_session() {
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            concat!(
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Finish contract\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"status\":\"completed\",\"name\":\"apply_patch\",\"call_id\":\"call_patch\",\"input\":\"*** Begin Patch\\n*** Update File: /tmp/project/src/lib.rs\\n@@\\n-old\\n+new\\n*** End Patch\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"cargo test\\\"}\",\"call_id\":\"call_validate\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_validate\",\"output\":\"Chunk ID: test\\nWall time: 0.01s\\nProcess exited with code 1\\nOriginal token count: 12\\nOutput:\\n\\nProcess running with session ID 23259\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"write_stdin\",\"arguments\":\"{\\\"session_id\\\":23259,\\\"chars\\\":\\\"\\\",\\\"yield_time_ms\\\":1000}\",\"call_id\":\"call_poll\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_poll\",\"output\":\"Chunk ID: poll\\nWall time: 0.01s\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\nok\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"git status --short\\\"}\",\"call_id\":\"call_status\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_status\",\"output\":\"Chunk ID: status\\nWall time: 0.01s\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\n M src/lib.rs\\n\"}}\n"
+            ),
+        )
+        .expect("write fixture");
+
+        assert_eq!(
+            parse(file.path(), &ExtractOptions::default())
+                .expect("parse")
+                .commit_signal,
+            Some(CommitSignal {
+                candidate: false,
+                edited: true,
+                validated: false,
+                dirty_checked: true,
+                commit_seen: false,
+            })
+        );
     }
 
     #[test]
@@ -1210,7 +1341,9 @@ mod tests {
                 "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"git status --short\\\"}\",\"call_id\":\"call_status\"}}\n",
                 "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"status\":\"completed\",\"name\":\"apply_patch\",\"call_id\":\"call_patch\",\"input\":\"*** Begin Patch\\n*** Update File: /tmp/project/Sources/App.swift\\n@@\\n-old\\n+new\\n*** End Patch\\n\"}}\n",
                 "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"make test\\\"}\",\"call_id\":\"call_validate\"}}\n",
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_validate\",\"output\":\"Chunk ID: abc123\\nWall time: 0.0100 seconds\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\nvalidation passed\\n\"}}\n"
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_validate\",\"output\":\"Chunk ID: abc123\\nWall time: 0.0100 seconds\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\nvalidation passed\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"git status --short\\\"}\",\"call_id\":\"call_fresh_status\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_fresh_status\",\"output\":\"Chunk ID: status\\nWall time: 0.0100 seconds\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\n M src/lib.rs\\n\"}}\n"
             ),
         )
         .expect("write fixture");
@@ -1219,6 +1352,130 @@ mod tests {
 
         assert_eq!(
             snapshot.commit_signal,
+            Some(CommitSignal {
+                candidate: true,
+                edited: true,
+                validated: true,
+                dirty_checked: true,
+                commit_seen: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_codex_failed_dirty_check_does_not_mark_commit_ready() {
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            concat!(
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Finish contract\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"status\":\"completed\",\"name\":\"apply_patch\",\"call_id\":\"call_patch\",\"input\":\"*** Begin Patch\\n*** Update File: /tmp/project/src/lib.rs\\n@@\\n-old\\n+new\\n*** End Patch\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"cargo test\\\"}\",\"call_id\":\"call_validate\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_validate\",\"output\":\"Chunk ID: test\\nWall time: 0.01s\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\nok\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"git status --short\\\"}\",\"call_id\":\"call_status\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_status\",\"output\":\"Chunk ID: status\\nWall time: 0.01s\\nProcess exited with code 128\\nOriginal token count: 12\\nOutput:\\n\\nfatal: not a git repository\\n\"}}\n"
+            ),
+        )
+        .expect("write fixture");
+
+        assert_eq!(
+            parse(file.path(), &ExtractOptions::default())
+                .expect("parse")
+                .commit_signal,
+            Some(CommitSignal {
+                candidate: false,
+                edited: true,
+                validated: true,
+                dirty_checked: false,
+                commit_seen: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_codex_diff_check_does_not_prove_dirty_tree_checked() {
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            concat!(
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Finish contract\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"status\":\"completed\",\"name\":\"apply_patch\",\"call_id\":\"call_patch\",\"input\":\"*** Begin Patch\\n*** Update File: /tmp/project/src/lib.rs\\n@@\\n-old\\n+new\\n*** End Patch\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"cargo test\\\"}\",\"call_id\":\"call_validate\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_validate\",\"output\":\"Chunk ID: test\\nWall time: 0.01s\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\nok\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"git diff --check\\\"}\",\"call_id\":\"call_diff_check\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_diff_check\",\"output\":\"Chunk ID: diff\\nWall time: 0.01s\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\n\"}}\n"
+            ),
+        )
+        .expect("write fixture");
+
+        assert_eq!(
+            parse(file.path(), &ExtractOptions::default())
+                .expect("parse")
+                .commit_signal,
+            Some(CommitSignal {
+                candidate: false,
+                edited: true,
+                validated: true,
+                dirty_checked: false,
+                commit_seen: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_codex_failed_commit_does_not_suppress_commit_candidate() {
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            concat!(
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Commit if ready\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"status\":\"completed\",\"name\":\"apply_patch\",\"call_id\":\"call_patch\",\"input\":\"*** Begin Patch\\n*** Update File: /tmp/project/src/lib.rs\\n@@\\n-old\\n+new\\n*** End Patch\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"cargo test\\\"}\",\"call_id\":\"call_validate\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_validate\",\"output\":\"Chunk ID: test\\nWall time: 0.01s\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\nok\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"git status --short\\\"}\",\"call_id\":\"call_status\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_status\",\"output\":\"Chunk ID: status\\nWall time: 0.01s\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\n M src/lib.rs\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"git commit -m ready\\\"}\",\"call_id\":\"call_commit\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_commit\",\"output\":\"Chunk ID: commit\\nWall time: 0.01s\\nProcess exited with code 1\\nOriginal token count: 12\\nOutput:\\n\\nmissing user.name\\n\"}}\n"
+            ),
+        )
+        .expect("write fixture");
+
+        assert_eq!(
+            parse(file.path(), &ExtractOptions::default())
+                .expect("parse")
+                .commit_signal,
+            Some(CommitSignal {
+                candidate: true,
+                edited: true,
+                validated: true,
+                dirty_checked: true,
+                commit_seen: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_codex_commit_dry_run_does_not_suppress_commit_candidate() {
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            concat!(
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Commit if ready\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"status\":\"completed\",\"name\":\"apply_patch\",\"call_id\":\"call_patch\",\"input\":\"*** Begin Patch\\n*** Update File: /tmp/project/src/lib.rs\\n@@\\n-old\\n+new\\n*** End Patch\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"cargo test\\\"}\",\"call_id\":\"call_validate\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_validate\",\"output\":\"Chunk ID: test\\nWall time: 0.01s\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\nok\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"git status --short\\\"}\",\"call_id\":\"call_status\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_status\",\"output\":\"Chunk ID: status\\nWall time: 0.01s\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\n M src/lib.rs\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"git commit --dry-run -m ready\\\"}\",\"call_id\":\"call_commit\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_commit\",\"output\":\"Chunk ID: commit\\nWall time: 0.01s\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\nOn branch main\\nChanges to be committed\\n\"}}\n"
+            ),
+        )
+        .expect("write fixture");
+
+        assert_eq!(
+            parse(file.path(), &ExtractOptions::default())
+                .expect("parse")
+                .commit_signal,
             Some(CommitSignal {
                 candidate: true,
                 edited: true,
@@ -1241,7 +1498,9 @@ mod tests {
                 "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"make test\\\"}\",\"call_id\":\"call_validate\"}}\n",
                 "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_validate\",\"output\":\"Chunk ID: abc123\\nWall time: 0.0100 seconds\\nProcess running with session ID 23259\\nOriginal token count: 12\\nOutput:\\n\"}}\n",
                 "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"write_stdin\",\"arguments\":\"{\\\"session_id\\\":23259,\\\"chars\\\":\\\"\\\",\\\"yield_time_ms\\\":1000}\",\"call_id\":\"call_poll\"}}\n",
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_poll\",\"output\":\"Chunk ID: def456\\nWall time: 0.0100 seconds\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\nvalidation passed\\n\"}}\n"
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_poll\",\"output\":\"Chunk ID: def456\\nWall time: 0.0100 seconds\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\nvalidation passed\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"git diff --stat\\\"}\",\"call_id\":\"call_fresh_status\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_fresh_status\",\"output\":\"Chunk ID: status\\nWall time: 0.0100 seconds\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\n src/lib.rs | 2 +-\\n\"}}\n"
             ),
         )
         .expect("write fixture");
@@ -1254,6 +1513,76 @@ mod tests {
                 candidate: true,
                 edited: true,
                 validated: true,
+                dirty_checked: true,
+                commit_seen: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_codex_commit_before_later_edit_does_not_suppress_new_candidate() {
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            concat!(
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Continue after commit\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"status\":\"completed\",\"name\":\"apply_patch\",\"call_id\":\"call_patch1\",\"input\":\"*** Begin Patch\\n*** Update File: /tmp/project/src/widget.tsx\\n@@\\n-old\\n+new\\n*** End Patch\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"cargo test\\\"}\",\"call_id\":\"call_validate1\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_validate1\",\"output\":\"Chunk ID: abc\\nWall time: 0.01s\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\nok\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"git status --short\\\"}\",\"call_id\":\"call_status1\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_status1\",\"output\":\"Chunk ID: status1\\nWall time: 0.01s\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\n M src/widget.tsx\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"git commit -m first\\\"}\",\"call_id\":\"call_commit\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_commit\",\"output\":\"Chunk ID: commit\\nWall time: 0.01s\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\n[main abc123] first\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"status\":\"completed\",\"name\":\"apply_patch\",\"call_id\":\"call_patch2\",\"input\":\"*** Begin Patch\\n*** Update File: /tmp/project/src/widget.tsx\\n@@\\n-new\\n+newer\\n*** End Patch\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"cargo test\\\"}\",\"call_id\":\"call_validate2\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_validate2\",\"output\":\"Chunk ID: def\\nWall time: 0.01s\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\nok\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"git status --short\\\"}\",\"call_id\":\"call_status2\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_status2\",\"output\":\"Chunk ID: status2\\nWall time: 0.01s\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\n M src/widget.tsx\\n\"}}\n"
+            ),
+        )
+        .expect("write fixture");
+
+        assert_eq!(
+            parse(file.path(), &ExtractOptions::default())
+                .expect("parse")
+                .commit_signal,
+            Some(CommitSignal {
+                candidate: true,
+                edited: true,
+                validated: true,
+                dirty_checked: true,
+                commit_seen: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_codex_later_edit_ignores_stale_running_validation_completion() {
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            concat!(
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Keep validation fresh\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"status\":\"completed\",\"name\":\"apply_patch\",\"call_id\":\"call_patch1\",\"input\":\"*** Begin Patch\\n*** Update File: /tmp/project/Sources/App.swift\\n@@\\n-old\\n+new\\n*** End Patch\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"make test\\\"}\",\"call_id\":\"call_validate\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_validate\",\"output\":\"Chunk ID: abc123\\nWall time: 0.0100 seconds\\nProcess running with session ID 23259\\nOriginal token count: 12\\nOutput:\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"status\":\"completed\",\"name\":\"apply_patch\",\"call_id\":\"call_patch2\",\"input\":\"*** Begin Patch\\n*** Update File: /tmp/project/Sources/App.swift\\n@@\\n-new\\n+newer\\n*** End Patch\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"write_stdin\",\"arguments\":\"{\\\"session_id\\\":23259,\\\"chars\\\":\\\"\\\",\\\"yield_time_ms\\\":1000}\",\"call_id\":\"call_poll\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_poll\",\"output\":\"Chunk ID: def456\\nWall time: 0.0100 seconds\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\nvalidation passed\\n\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"git status --short\\\"}\",\"call_id\":\"call_fresh_status\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_fresh_status\",\"output\":\"Chunk ID: status\\nWall time: 0.0100 seconds\\nProcess exited with code 0\\nOriginal token count: 12\\nOutput:\\n\\n M Sources/App.swift\\n\"}}\n"
+            ),
+        )
+        .expect("write fixture");
+
+        assert_eq!(
+            parse(file.path(), &ExtractOptions::default())
+                .expect("parse")
+                .commit_signal,
+            Some(CommitSignal {
+                candidate: false,
+                edited: true,
+                validated: false,
                 dirty_checked: true,
                 commit_seen: false,
             })

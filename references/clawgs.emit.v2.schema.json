@@ -1,0 +1,532 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:clawgs:emit:v2",
+  "title": "clawgs.emit.v2 NDJSON protocol message",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/hello"
+    },
+    {
+      "$ref": "#/$defs/sync_request"
+    },
+    {
+      "$ref": "#/$defs/sync_result"
+    },
+    {
+      "$ref": "#/$defs/error"
+    }
+  ],
+  "$defs": {
+    "hello": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "protocol", "engine_version"],
+      "properties": {
+        "type": {
+          "const": "hello"
+        },
+        "protocol": {
+          "const": "clawgs.emit.v2"
+        },
+        "engine_version": {
+          "type": "string"
+        }
+      }
+    },
+    "sync_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id", "now", "config", "sessions"],
+      "properties": {
+        "type": {
+          "const": "sync"
+        },
+        "id": {
+          "type": "string"
+        },
+        "now": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "config": {
+          "$ref": "#/$defs/thought_config"
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/session_snapshot"
+          }
+        }
+      }
+    },
+    "sync_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id", "stream_instance_id", "updates", "metrics"],
+      "properties": {
+        "type": {
+          "const": "sync_result"
+        },
+        "id": {
+          "type": "string"
+        },
+        "stream_instance_id": {
+          "type": "string"
+        },
+        "updates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/thought_update"
+          }
+        },
+        "metrics": {
+          "$ref": "#/$defs/sync_metrics"
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "code", "message"],
+      "properties": {
+        "type": {
+          "const": "error"
+        },
+        "id": {
+          "type": ["string", "null"]
+        },
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "thought_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "model",
+        "cadence_hot_ms",
+        "cadence_warm_ms",
+        "cadence_cold_ms"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "backend": {
+          "type": "string",
+          "enum": ["", "openrouter", "claude", "codex"]
+        },
+        "cadence_hot_ms": {
+          "type": "integer",
+          "minimum": 5000,
+          "maximum": 300000
+        },
+        "cadence_warm_ms": {
+          "type": "integer",
+          "minimum": 5000,
+          "maximum": 600000
+        },
+        "cadence_cold_ms": {
+          "type": "integer",
+          "minimum": 5000,
+          "maximum": 1800000
+        },
+        "agent_prompt": {
+          "type": ["string", "null"],
+          "maxLength": 4000
+        },
+        "terminal_prompt": {
+          "type": ["string", "null"],
+          "maxLength": 4000
+        }
+      }
+    },
+    "session_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "state",
+        "exited",
+        "tool",
+        "cwd",
+        "replay_text",
+        "thought",
+        "thought_state",
+        "thought_source",
+        "objective_fingerprint",
+        "thought_updated_at",
+        "token_count",
+        "context_limit",
+        "last_activity_at",
+        "rest_state",
+        "commit_candidate"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/session_state"
+        },
+        "exited": {
+          "type": "boolean"
+        },
+        "tool": {
+          "type": ["string", "null"]
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "replay_text": {
+          "type": "string"
+        },
+        "thought": {
+          "type": ["string", "null"]
+        },
+        "thought_state": {
+          "$ref": "#/$defs/thought_state"
+        },
+        "thought_source": {
+          "$ref": "#/$defs/thought_source"
+        },
+        "objective_fingerprint": {
+          "type": ["string", "null"]
+        },
+        "thought_updated_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "token_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "context_limit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_activity_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "rest_state": {
+          "$ref": "#/$defs/rest_state"
+        },
+        "commit_candidate": {
+          "type": "boolean"
+        },
+        "action_cues": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/action_cue"
+          }
+        }
+      }
+    },
+    "thought_update": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "token_count",
+        "context_limit",
+        "thought_state",
+        "thought_source",
+        "objective_changed",
+        "bubble_precedence",
+        "at",
+        "rest_state",
+        "commit_candidate"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "stream_instance_id": {
+          "type": ["string", "null"]
+        },
+        "emission_seq": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "thought": {
+          "type": ["string", "null"]
+        },
+        "token_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "context_limit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "thought_state": {
+          "$ref": "#/$defs/thought_state"
+        },
+        "thought_source": {
+          "$ref": "#/$defs/thought_source"
+        },
+        "objective_changed": {
+          "type": "boolean"
+        },
+        "bubble_precedence": {
+          "$ref": "#/$defs/bubble_precedence"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "objective_fingerprint": {
+          "type": ["string", "null"]
+        },
+        "rest_state": {
+          "$ref": "#/$defs/rest_state"
+        },
+        "commit_candidate": {
+          "type": "boolean"
+        },
+        "action_cues": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/action_cue"
+          }
+        },
+        "timing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/timing_info"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cues": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/cue_info"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "timing_info": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_started_at", "run_elapsed_ms", "idle_elapsed_ms"],
+      "properties": {
+        "run_started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "run_finished_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "run_elapsed_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "idle_elapsed_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "cue_info": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cadence_tier", "cadence_ms", "next_llm_eligible_at", "context_source"],
+      "properties": {
+        "cadence_tier": {
+          "$ref": "#/$defs/cadence_tier"
+        },
+        "cadence_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "next_llm_eligible_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "context_source": {
+          "$ref": "#/$defs/context_source"
+        }
+      }
+    },
+    "action_cue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "status", "source", "confidence", "evidence"],
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/action_cue_kind"
+        },
+        "status": {
+          "$ref": "#/$defs/action_cue_status"
+        },
+        "source": {
+          "$ref": "#/$defs/action_cue_source"
+        },
+        "confidence": {
+          "$ref": "#/$defs/action_cue_confidence"
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/action_cue_evidence_label"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "kind": { "const": "awaiting_user" } },
+            "required": ["kind"]
+          },
+          "then": {
+            "properties": { "evidence": { "const": ["awaiting_user_input"] } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "kind": { "const": "commit_ready" } },
+            "required": ["kind"]
+          },
+          "then": {
+            "properties": {
+              "evidence": {
+                "const": [
+                  "edit_seen",
+                  "validation_succeeded",
+                  "dirty_tree_checked_after_latest_edit",
+                  "commit_not_seen_after_latest_edit"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "kind": { "const": "validation_missing_after_edit" } },
+            "required": ["kind"]
+          },
+          "then": {
+            "properties": {
+              "evidence": {
+                "const": [
+                  "edit_seen",
+                  "fresh_validation_not_seen",
+                  "commit_not_seen_after_latest_edit"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "kind": { "const": "dirty_check_missing" } },
+            "required": ["kind"]
+          },
+          "then": {
+            "properties": {
+              "evidence": {
+                "const": [
+                  "edit_seen",
+                  "validation_succeeded",
+                  "dirty_tree_check_not_seen_after_latest_edit",
+                  "commit_not_seen_after_latest_edit"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "sync_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessions_seen", "llm_calls", "suppressed"],
+      "properties": {
+        "sessions_seen": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "llm_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "suppressed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_backend_error": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "session_state": {
+      "enum": ["idle", "busy", "error", "attention", "exited"]
+    },
+    "thought_state": {
+      "enum": ["active", "holding", "sleeping"]
+    },
+    "thought_source": {
+      "enum": ["carry_forward", "llm", "static_sleeping"]
+    },
+    "rest_state": {
+      "enum": ["active", "drowsy", "sleeping", "deep_sleep"]
+    },
+    "bubble_precedence": {
+      "enum": ["thought_first"]
+    },
+    "cadence_tier": {
+      "enum": ["hot", "warm", "cold"]
+    },
+    "context_source": {
+      "enum": ["transcript", "terminal"]
+    },
+    "action_cue_kind": {
+      "enum": [
+        "awaiting_user",
+        "commit_ready",
+        "validation_missing_after_edit",
+        "dirty_check_missing"
+      ]
+    },
+    "action_cue_status": {
+      "enum": ["active"]
+    },
+    "action_cue_source": {
+      "enum": ["transcript"]
+    },
+    "action_cue_confidence": {
+      "enum": ["deterministic"]
+    },
+    "action_cue_evidence_label": {
+      "enum": [
+        "awaiting_user_input",
+        "edit_seen",
+        "validation_succeeded",
+        "dirty_tree_checked_after_latest_edit",
+        "dirty_tree_check_not_seen_after_latest_edit",
+        "fresh_validation_not_seen",
+        "commit_not_seen_after_latest_edit"
+      ]
+    }
+  }
+}

@@ -6,6 +6,7 @@ lcov.info
 .mutate/
 mutants.out/
 .ntm/
+refactor/
 
 # Per-workstation agent skill symlinks (not project content).
 .claude/

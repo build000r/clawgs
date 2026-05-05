@@ -21,7 +21,7 @@ on without coupling to the log format of any single agent.
 
 ### 1. Contract stability over feature breadth
 
-The `clawgs.v1` extract schema and the `clawgs.emit.v1` protocol are the
+The `clawgs.v2` extract schema and the `clawgs.emit.v2` protocol are the
 product. New features are only worth adding if they do not break downstream
 consumers. This has caused us to say "no" to fields that would be useful but
 unstable.
@@ -215,8 +215,8 @@ Based on what the landscape research surfaced:
 
 Nobody in the landscape offers a stable, versioned JSON schema for agent session
 state. The transcript viewers render to HTML. The hooks project streams raw
-events. Langfuse has its own proprietary trace model. `clawgs.v1` and
-`clawgs.emit.v1` are the only versioned, documented contracts in this space.
+events. Langfuse has its own proprietary trace model. `clawgs.v2` and
+`clawgs.emit.v2` are the only versioned, documented contracts in this space.
 Double down on this: make the schema strict, publish JSON Schema files, and make
 it trivial for downstream tools to validate against.
 

@@ -3,8 +3,8 @@
 <div align="center">
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/build000r/clawgs/blob/main/LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
-[![Protocol](https://img.shields.io/badge/protocol-clawgs.emit.v1-blue.svg)](https://github.com/build000r/clawgs/blob/main/references/emit-protocol-v1.md)
+[![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
+[![Protocol](https://img.shields.io/badge/protocol-clawgs.emit.v2-blue.svg)](https://github.com/build000r/clawgs/blob/main/references/emit-protocol-v2.md)
 
 </div>
 
@@ -29,16 +29,16 @@ Agent transcripts are useful, but they are verbose, tool-specific, and usually t
 
 ### The Solution
 
-`clawgs` normalizes Claude Code and Codex session logs into a small, stable JSON contract, and it exposes the live thought-emission protocol over NDJSON. The new `demo` command makes the whole thing legible from a clean machine with embedded, sanitized examples in [examples/demo](https://github.com/build000r/clawgs/tree/main/examples/demo).
+`clawgs` normalizes Claude Code and Codex session logs into a small, stable JSON contract, including deterministic `action_cues` for transcript-backed attention facts, and it exposes the live thought-emission protocol over NDJSON. The new `demo` command makes the whole thing legible from a clean machine with embedded, sanitized examples in [examples/demo](https://github.com/build000r/clawgs/tree/main/examples/demo).
 
 ### Why Use `clawgs`?
 
 | Feature | What It Does |
 | --- | --- |
-| `demo extract` | Replays a built-in transcript corpus and shows the exact normalized `clawgs.v1` output without needing private logs |
+| `demo extract` | Replays a built-in transcript corpus and shows the exact normalized `clawgs.v2` output without needing private logs |
 | `demo emit` | Shows a real `hello -> sync -> sync_result` exchange without model credentials or tmux |
-| `extract` | Normalizes Claude/Codex JSONL into one compact machine-readable snapshot |
-| `emit --stdio` | Speaks a small NDJSON protocol for downstream status reporters |
+| `extract` | Normalizes Claude/Codex JSONL into one compact machine-readable snapshot with parser-derived `action_cues` |
+| `emit --stdio` | Speaks a small NDJSON protocol for downstream status reporters, including live `action_cues` |
 | `tmux-emit` | Scans live tmux panes, infers context, and emits only changed thoughts |
 
 ## Quick Example
@@ -68,12 +68,13 @@ Or build from source:
 
 ```bash
 git clone https://github.com/build000r/clawgs && cd clawgs
+# Requires Rust 1.85 or newer.
 bash scripts/install.sh
 bash scripts/check.sh
 target/release/clawgs demo extract --tool codex --pretty
 ```
 
-Protocol details live in [references/emit-protocol-v1.md](https://github.com/build000r/clawgs/blob/main/references/emit-protocol-v1.md), with a machine-validatable JSON Schema at [references/clawgs.emit.v1.schema.json](references/clawgs.emit.v1.schema.json). The extract schema lives in [references/schema-v1.md](https://github.com/build000r/clawgs/blob/main/references/schema-v1.md), with JSON Schema at [references/clawgs.v1.schema.json](references/clawgs.v1.schema.json).
+Protocol details live in [references/emit-protocol-v2.md](https://github.com/build000r/clawgs/blob/main/references/emit-protocol-v2.md), with a machine-validatable JSON Schema at [references/clawgs.emit.v2.schema.json](references/clawgs.emit.v2.schema.json). The extract schema lives in [references/schema-v2.md](https://github.com/build000r/clawgs/blob/main/references/schema-v2.md), with JSON Schema at [references/clawgs.v2.schema.json](references/clawgs.v2.schema.json).
 
 ## Design Philosophy
 
@@ -194,7 +195,7 @@ target/release/clawgs demo emit --pretty
 
 ### `clawgs extract`
 
-Parses a real JSONL transcript into one `clawgs.v1` document.
+Parses a real JSONL transcript into one `clawgs.v2` document.
 
 ```bash
 target/release/clawgs extract --tool auto --cwd "$PWD"
@@ -303,8 +304,8 @@ The demo commands do not require any of the variables above.
                              ▼
 ┌───────────────────────────────────────────────────────────────┐
 │ Stable Contracts                                               │
-│ - `clawgs.v1` extract snapshot                                │
-│ - `clawgs.emit.v1` hello/sync/sync_result protocol            │
+│ - `clawgs.v2` extract snapshot                                │
+│ - `clawgs.emit.v2` hello/sync/sync_result protocol            │
 └───────────────────────────────────────────────────────────────┘
                              │
             ┌────────────────┴────────────────┐
@@ -389,7 +390,7 @@ Yes. `extract`, `demo`, `emit --stdio`, and `defaults` do not require tmux.
 
 ### Can I inspect the exact schema and protocol?
 
-Yes. See [references/schema-v1.md](https://github.com/build000r/clawgs/blob/main/references/schema-v1.md), [references/clawgs.v1.schema.json](references/clawgs.v1.schema.json), [references/emit-protocol-v1.md](https://github.com/build000r/clawgs/blob/main/references/emit-protocol-v1.md), and [references/clawgs.emit.v1.schema.json](references/clawgs.emit.v1.schema.json).
+Yes. See [references/schema-v2.md](https://github.com/build000r/clawgs/blob/main/references/schema-v2.md), [references/clawgs.v2.schema.json](references/clawgs.v2.schema.json), [references/emit-protocol-v2.md](https://github.com/build000r/clawgs/blob/main/references/emit-protocol-v2.md), and [references/clawgs.emit.v2.schema.json](references/clawgs.emit.v2.schema.json).
 
 ### Is the demo corpus the same thing as the tests?
 

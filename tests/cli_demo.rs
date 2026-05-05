@@ -32,7 +32,7 @@ fn demo_extract_codex_outputs_embedded_input_and_snapshot() {
         .as_str()
         .expect("input should be a string")
         .contains("Build a parser"));
-    assert_eq!(json["output"]["schema_version"], "clawgs.v1");
+    assert_eq!(json["output"]["schema_version"], "clawgs.v2");
     assert_eq!(json["output"]["source"]["tool"], "codex");
     assert_eq!(
         json["output"]["source"]["path"],
@@ -61,7 +61,7 @@ fn demo_extract_claude_outputs_embedded_input_and_snapshot() {
         .as_str()
         .expect("input should be a string")
         .contains("Summarize logs"));
-    assert_eq!(json["output"]["schema_version"], "clawgs.v1");
+    assert_eq!(json["output"]["schema_version"], "clawgs.v2");
     assert_eq!(json["output"]["source"]["tool"], "claude");
     assert_eq!(
         json["output"]["source"]["path"],
@@ -107,6 +107,26 @@ fn demo_emit_outputs_canonical_exchange_without_backends() {
         "Turning raw transcripts into stable session state"
     );
     assert_eq!(json["response"]["updates"][0]["thought_source"], "llm");
+    let expected_cue = serde_json::json!({
+        "kind": "commit_ready",
+        "status": "active",
+        "source": "transcript",
+        "confidence": "deterministic",
+        "evidence": [
+            "edit_seen",
+            "validation_succeeded",
+            "dirty_tree_checked_after_latest_edit",
+            "commit_not_seen_after_latest_edit"
+        ]
+    });
+    assert_eq!(
+        json["request"]["sessions"][0]["action_cues"],
+        serde_json::json!([expected_cue.clone()])
+    );
+    assert_eq!(
+        json["response"]["updates"][0]["action_cues"],
+        serde_json::json!([expected_cue])
+    );
 }
 
 #[test]

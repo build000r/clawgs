@@ -31,7 +31,7 @@ if ! output="$($bin_path extract --tool codex --input "$tmp_file" 2>/dev/null)";
   exit 1
 fi
 
-if ! printf '%s' "$output" | grep -q '"schema_version":"clawgs.v1"'; then
+if ! printf '%s' "$output" | grep -q '"schema_version":"clawgs.v2"'; then
   echo "error: smoke extraction returned unexpected output" >&2
   exit 1
 fi

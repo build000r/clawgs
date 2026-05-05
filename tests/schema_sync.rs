@@ -6,7 +6,10 @@ use clawgs::emit::protocol::{
     SessionSnapshot, SessionState, SyncMetrics, SyncRequest, SyncResultMessage, ThoughtConfig,
     ThoughtSource, ThoughtState, ThoughtUpdate, TimingInfo,
 };
-use clawgs::{extract, AgentTool, ExtractOptions};
+use clawgs::{
+    extract, ActionCue, ActionCueConfidence, ActionCueKind, ActionCueSource, ActionCueStatus,
+    AgentTool, ExtractOptions,
+};
 use jsonschema::JSONSchema;
 use serde_json::Value;
 
@@ -25,6 +28,15 @@ fn validate(schema: &Value, instance: &Value) {
         let messages: Vec<String> = errors.map(|error| error.to_string()).collect();
         panic!("schema validation failed:\n{}", messages.join("\n"));
     };
+}
+
+fn validation_errors(schema: &Value, instance: &Value) -> Vec<String> {
+    let compiled = JSONSchema::compile(schema).expect("valid json schema");
+    compiled
+        .validate(instance)
+        .err()
+        .map(|errors| errors.map(|error| error.to_string()).collect())
+        .unwrap_or_default()
 }
 
 fn extract_fixture(tool: AgentTool, input: &Path) -> Value {
@@ -60,6 +72,7 @@ fn sample_session(now: chrono::DateTime<Utc>) -> SessionSnapshot {
         last_activity_at: now - Duration::seconds(1),
         rest_state: RestState::Active,
         commit_candidate: true,
+        action_cues: vec![commit_ready_cue()],
     }
 }
 
@@ -79,6 +92,7 @@ fn sample_update(now: chrono::DateTime<Utc>) -> ThoughtUpdate {
         objective_fingerprint: Some("objective-1".to_string()),
         rest_state: RestState::Drowsy,
         commit_candidate: true,
+        action_cues: vec![commit_ready_cue()],
         timing: Some(TimingInfo {
             run_started_at: now - Duration::minutes(3),
             run_finished_at: Some(now),
@@ -94,15 +108,30 @@ fn sample_update(now: chrono::DateTime<Utc>) -> ThoughtUpdate {
     }
 }
 
+fn commit_ready_cue() -> ActionCue {
+    ActionCue {
+        kind: ActionCueKind::CommitReady,
+        status: ActionCueStatus::Active,
+        source: ActionCueSource::Transcript,
+        confidence: ActionCueConfidence::Deterministic,
+        evidence: vec![
+            "edit_seen".to_string(),
+            "validation_succeeded".to_string(),
+            "dirty_tree_checked_after_latest_edit".to_string(),
+            "commit_not_seen_after_latest_edit".to_string(),
+        ],
+    }
+}
+
 #[test]
 fn schema_files_are_valid_json() {
-    load_json(include_str!("../references/clawgs.v1.schema.json"));
-    load_json(include_str!("../references/clawgs.emit.v1.schema.json"));
+    load_json(include_str!("../references/clawgs.v2.schema.json"));
+    load_json(include_str!("../references/clawgs.emit.v2.schema.json"));
 }
 
 #[test]
 fn extract_codex_output_validates() {
-    let schema = load_json(include_str!("../references/clawgs.v1.schema.json"));
+    let schema = load_json(include_str!("../references/clawgs.v2.schema.json"));
     let instance = extract_fixture(AgentTool::Codex, &fixture_path("codex-current.jsonl"));
 
     validate(&schema, &instance);
@@ -110,15 +139,48 @@ fn extract_codex_output_validates() {
 
 #[test]
 fn extract_claude_output_validates() {
-    let schema = load_json(include_str!("../references/clawgs.v1.schema.json"));
+    let schema = load_json(include_str!("../references/clawgs.v2.schema.json"));
     let instance = extract_fixture(AgentTool::Claude, &fixture_path("claude-sample.jsonl"));
 
     validate(&schema, &instance);
 }
 
 #[test]
+fn extract_schema_rejects_unknown_or_empty_action_cue_evidence() {
+    let schema = load_json(include_str!("../references/clawgs.v2.schema.json"));
+    let mut instance = extract_fixture(AgentTool::Codex, &fixture_path("codex-current.jsonl"));
+    instance["snapshot"]["action_cues"] = serde_json::json!([
+        {
+            "kind": "commit_ready",
+            "status": "active",
+            "source": "transcript",
+            "confidence": "deterministic",
+            "evidence": []
+        }
+    ]);
+
+    assert!(
+        !validation_errors(&schema, &instance).is_empty(),
+        "empty evidence must not validate"
+    );
+
+    instance["snapshot"]["action_cues"][0]["evidence"] =
+        serde_json::json!(["dirty_tree_checked_after_latest_edt"]);
+    assert!(
+        !validation_errors(&schema, &instance).is_empty(),
+        "typoed evidence label must not validate"
+    );
+
+    instance["snapshot"]["action_cues"][0]["evidence"] = serde_json::json!(["awaiting_user_input"]);
+    assert!(
+        !validation_errors(&schema, &instance).is_empty(),
+        "evidence for the wrong cue kind must not validate"
+    );
+}
+
+#[test]
 fn emit_hello_validates() {
-    let schema = load_json(include_str!("../references/clawgs.emit.v1.schema.json"));
+    let schema = load_json(include_str!("../references/clawgs.emit.v2.schema.json"));
     let instance = serde_json::to_value(HelloMessage::new()).expect("serialize hello");
 
     validate(&schema, &instance);
@@ -126,7 +188,7 @@ fn emit_hello_validates() {
 
 #[test]
 fn emit_sync_request_validates() {
-    let schema = load_json(include_str!("../references/clawgs.emit.v1.schema.json"));
+    let schema = load_json(include_str!("../references/clawgs.emit.v2.schema.json"));
     let now = Utc
         .with_ymd_and_hms(2026, 4, 29, 12, 0, 0)
         .single()
@@ -152,8 +214,28 @@ fn emit_sync_request_validates() {
 }
 
 #[test]
+fn emit_sync_request_validates_omitted_optional_prompts() {
+    let schema = load_json(include_str!("../references/clawgs.emit.v2.schema.json"));
+    let instance = serde_json::json!({
+        "type": "sync",
+        "id": "req-1",
+        "now": "2026-04-29T12:00:00Z",
+        "config": {
+            "enabled": true,
+            "model": "openai/gpt-5.4-mini",
+            "cadence_hot_ms": 15000,
+            "cadence_warm_ms": 45000,
+            "cadence_cold_ms": 120000
+        },
+        "sessions": []
+    });
+
+    validate(&schema, &instance);
+}
+
+#[test]
 fn emit_sync_result_validates() {
-    let schema = load_json(include_str!("../references/clawgs.emit.v1.schema.json"));
+    let schema = load_json(include_str!("../references/clawgs.emit.v2.schema.json"));
     let now = Utc
         .with_ymd_and_hms(2026, 4, 29, 12, 0, 0)
         .single()
@@ -175,8 +257,44 @@ fn emit_sync_result_validates() {
 }
 
 #[test]
+fn emit_schema_rejects_unknown_or_empty_action_cue_evidence() {
+    let schema = load_json(include_str!("../references/clawgs.emit.v2.schema.json"));
+    let now = Utc
+        .with_ymd_and_hms(2026, 4, 29, 12, 0, 0)
+        .single()
+        .expect("valid timestamp");
+    let mut instance = serde_json::to_value(SyncResultMessage::new(
+        "req-1",
+        "stream-1",
+        vec![sample_update(now)],
+        SyncMetrics::default(),
+    ))
+    .expect("serialize sync result");
+    instance["updates"][0]["action_cues"][0]["evidence"] = serde_json::json!([]);
+
+    assert!(
+        !validation_errors(&schema, &instance).is_empty(),
+        "empty evidence must not validate"
+    );
+
+    instance["updates"][0]["action_cues"][0]["evidence"] =
+        serde_json::json!(["validation_succeded"]);
+    assert!(
+        !validation_errors(&schema, &instance).is_empty(),
+        "typoed evidence label must not validate"
+    );
+
+    instance["updates"][0]["action_cues"][0]["evidence"] =
+        serde_json::json!(["awaiting_user_input"]);
+    assert!(
+        !validation_errors(&schema, &instance).is_empty(),
+        "evidence for the wrong cue kind must not validate"
+    );
+}
+
+#[test]
 fn emit_error_validates() {
-    let schema = load_json(include_str!("../references/clawgs.emit.v1.schema.json"));
+    let schema = load_json(include_str!("../references/clawgs.emit.v2.schema.json"));
     let instance = serde_json::to_value(ErrorMessage::new(
         Some("req-1".to_string()),
         "invalid_config",

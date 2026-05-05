@@ -1,8 +1,8 @@
 [package]
 name = "clawgs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-rust-version = "1.74"
+rust-version = "1.85"
 authors = ["build000r <buildooor@gmail.com>"]
 description = "Extract structured JSON snapshots from Claude Code and Codex JSONL transcripts"
 license = "MIT"
@@ -14,6 +14,7 @@ keywords = ["claude", "codex", "jsonl", "transcripts", "cli"]
 categories = ["command-line-utilities", "parser-implementations", "development-tools"]
 exclude = [
     "target/",
+    "refactor/",
     ".mutate/",
     "mutants.out/",
     "lcov.info",

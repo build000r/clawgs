@@ -5,11 +5,13 @@ use chrono::{DateTime, Utc};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::ActionCue;
+
 pub const HELLO_MESSAGE_TYPE: &str = "hello";
 pub const SYNC_MESSAGE_TYPE: &str = "sync";
 pub const SYNC_RESULT_MESSAGE_TYPE: &str = "sync_result";
 pub const SYNC_RESPONSE_MESSAGE_TYPE: &str = SYNC_RESULT_MESSAGE_TYPE;
-pub const EMIT_PROTOCOL_V1: &str = "clawgs.emit.v1";
+pub const EMIT_PROTOCOL_VERSION: &str = "clawgs.emit.v2";
 
 pub const CADENCE_HOT_MIN_MS: u64 = 5_000;
 pub const CADENCE_HOT_MAX_MS: u64 = 300_000;
@@ -222,6 +224,8 @@ pub struct SessionSnapshot {
     pub rest_state: RestState,
     #[serde(default)]
     pub commit_candidate: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub action_cues: Vec<ActionCue>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -382,6 +386,8 @@ pub struct SyncUpdate {
     pub rest_state: RestState,
     #[serde(default)]
     pub commit_candidate: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub action_cues: Vec<ActionCue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timing: Option<TimingInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -428,7 +434,7 @@ impl HelloMessage {
     pub fn new() -> Self {
         Self {
             msg_type: HELLO_MESSAGE_TYPE.to_string(),
-            protocol: EMIT_PROTOCOL_V1.to_string(),
+            protocol: EMIT_PROTOCOL_VERSION.to_string(),
             engine_version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
@@ -685,13 +691,14 @@ mod tests {
             context_limit: 100,
             last_activity_at: now,
             commit_candidate: false,
+            action_cues: Vec::new(),
         }
     }
 
     #[test]
     fn daemon_inbound_message_type_returns_canonical_strings() {
         let hello = DaemonInboundMessage::Hello {
-            protocol: "clawgs.emit.v1".to_string(),
+            protocol: "clawgs.emit.v2".to_string(),
         };
         assert_eq!(hello.message_type(), HELLO_MESSAGE_TYPE);
 
@@ -916,6 +923,7 @@ mod tests {
             objective_fingerprint: Some("obj-1".to_string()),
             rest_state: RestState::Active,
             commit_candidate: false,
+            action_cues: Vec::new(),
             timing: Some(TimingInfo {
                 run_started_at: now,
                 run_finished_at: None,

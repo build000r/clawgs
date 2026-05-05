@@ -83,13 +83,15 @@ impl TmuxScanTracker {
             .iter()
             .map(|observation| observation.session_id.clone())
             .collect();
+        let mut snapshots: Vec<_> = observations
+            .into_iter()
+            .map(|observation| self.apply_observation(now, observation))
+            .collect();
+        snapshots.extend(self.exited_snapshots_for_missing(&live_ids));
         self.sessions
             .retain(|session_id, _| live_ids.contains(session_id));
 
-        Ok(observations
-            .into_iter()
-            .map(|observation| self.apply_observation(now, observation))
-            .collect())
+        Ok(snapshots)
     }
 
     fn apply_observation(
@@ -134,7 +136,16 @@ impl TmuxScanTracker {
             last_activity_at,
             rest_state: RestState::Active,
             commit_candidate: false,
+            action_cues: Vec::new(),
         }
+    }
+
+    fn exited_snapshots_for_missing(&self, live_ids: &HashSet<String>) -> Vec<SessionSnapshot> {
+        self.sessions
+            .iter()
+            .filter(|(session_id, _)| !live_ids.contains(*session_id))
+            .map(|(session_id, tracked)| exited_snapshot(session_id, tracked))
+            .collect()
     }
 }
 
@@ -239,6 +250,7 @@ struct SessionObservation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TrackedSession {
+    tool: Option<String>,
     cwd: String,
     replay_text: String,
     current_command: String,
@@ -248,6 +260,7 @@ struct TrackedSession {
 impl TrackedSession {
     fn from_observation(observation: SessionObservation, last_activity_at: DateTime<Utc>) -> Self {
         Self {
+            tool: observation.tool,
             cwd: observation.cwd,
             replay_text: observation.replay_text,
             current_command: observation.current_command,
@@ -259,6 +272,28 @@ impl TrackedSession {
         self.cwd != observation.cwd
             || self.replay_text != observation.replay_text
             || self.current_command != observation.current_command
+    }
+}
+
+fn exited_snapshot(session_id: &str, tracked: &TrackedSession) -> SessionSnapshot {
+    SessionSnapshot {
+        session_id: session_id.to_string(),
+        state: SessionState::Exited,
+        exited: true,
+        tool: tracked.tool.clone(),
+        cwd: tracked.cwd.clone(),
+        replay_text: tracked.replay_text.clone(),
+        thought: None,
+        thought_state: ThoughtState::Holding,
+        thought_source: ThoughtSource::CarryForward,
+        objective_fingerprint: None,
+        thought_updated_at: None,
+        token_count: 0,
+        context_limit: 0,
+        last_activity_at: tracked.last_activity_at,
+        rest_state: RestState::DeepSleep,
+        commit_candidate: false,
+        action_cues: Vec::new(),
     }
 }
 
@@ -726,5 +761,31 @@ mod tests {
         );
         assert_eq!(changed.state, SessionState::Busy);
         assert_eq!(changed.last_activity_at, later);
+    }
+
+    #[test]
+    fn tracker_builds_exited_snapshot_for_missing_tracked_pane() {
+        let now = Utc::now();
+        let mut tracker = TmuxScanTracker::new();
+        let session_id = "tmux:work:1.0:%1".to_string();
+
+        tracker.apply_observation(
+            now,
+            SessionObservation {
+                session_id: session_id.clone(),
+                tool: Some("codex".to_string()),
+                cwd: "/tmp/project".to_string(),
+                replay_text: "Ready to commit".to_string(),
+                current_command: "codex".to_string(),
+            },
+        );
+
+        let exited = tracker.exited_snapshots_for_missing(&std::collections::HashSet::new());
+        assert_eq!(exited.len(), 1);
+        assert_eq!(exited[0].session_id, session_id);
+        assert_eq!(exited[0].state, SessionState::Exited);
+        assert!(exited[0].exited);
+        assert_eq!(exited[0].rest_state, RestState::DeepSleep);
+        assert_eq!(exited[0].tool.as_deref(), Some("codex"));
     }
 }

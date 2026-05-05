@@ -10,12 +10,12 @@ use std::time::SystemTime;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use parsers::ParseSnapshot;
 
-const SCHEMA_VERSION: &str = "clawgs.v1";
+const SCHEMA_VERSION: &str = "clawgs.v2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentTool {
@@ -86,6 +86,102 @@ impl CommitSignal {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActionCue {
+    pub kind: ActionCueKind,
+    pub status: ActionCueStatus,
+    pub source: ActionCueSource,
+    pub confidence: ActionCueConfidence,
+    pub evidence: Vec<String>,
+}
+
+impl ActionCue {
+    fn active(kind: ActionCueKind, evidence: &[&str]) -> Self {
+        Self {
+            kind,
+            status: ActionCueStatus::Active,
+            source: ActionCueSource::Transcript,
+            confidence: ActionCueConfidence::Deterministic,
+            evidence: evidence.iter().map(|item| item.to_string()).collect(),
+        }
+    }
+
+    pub fn expected_evidence(kind: ActionCueKind) -> &'static [&'static str] {
+        match kind {
+            ActionCueKind::AwaitingUser => &["awaiting_user_input"],
+            ActionCueKind::CommitReady => &[
+                "edit_seen",
+                "validation_succeeded",
+                "dirty_tree_checked_after_latest_edit",
+                "commit_not_seen_after_latest_edit",
+            ],
+            ActionCueKind::ValidationMissingAfterEdit => &[
+                "edit_seen",
+                "fresh_validation_not_seen",
+                "commit_not_seen_after_latest_edit",
+            ],
+            ActionCueKind::DirtyCheckMissing => &[
+                "edit_seen",
+                "validation_succeeded",
+                "dirty_tree_check_not_seen_after_latest_edit",
+                "commit_not_seen_after_latest_edit",
+            ],
+        }
+    }
+
+    pub fn has_expected_evidence(&self) -> bool {
+        let expected = Self::expected_evidence(self.kind);
+        self.evidence.len() == expected.len()
+            && self
+                .evidence
+                .iter()
+                .zip(expected.iter())
+                .all(|(actual, expected)| actual == expected)
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.has_expected_evidence()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionCueKind {
+    AwaitingUser,
+    CommitReady,
+    ValidationMissingAfterEdit,
+    DirtyCheckMissing,
+}
+
+impl ActionCueKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AwaitingUser => "awaiting_user",
+            Self::CommitReady => "commit_ready",
+            Self::ValidationMissingAfterEdit => "validation_missing_after_edit",
+            Self::DirtyCheckMissing => "dirty_check_missing",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionCueStatus {
+    Active,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionCueSource {
+    Transcript,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionCueConfidence {
+    Deterministic,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Snapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -100,6 +196,8 @@ pub struct Snapshot {
     pub recent_actions: Vec<Action>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_signal: Option<CommitSignal>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub action_cues: Vec<ActionCue>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -174,6 +272,8 @@ pub fn extract(
         AgentTool::Claude => parsers::claude::parse(path, options)?,
         AgentTool::Codex => parsers::codex::parse(path, options)?,
     };
+    let action_cues =
+        action_cues_for_snapshot(parsed.commit_signal.as_ref(), parsed.awaiting_user_input);
 
     Ok(ExtractOutput {
         schema_version: SCHEMA_VERSION.to_string(),
@@ -191,6 +291,7 @@ pub fn extract(
             awaiting_user_text: parsed.awaiting_user_text,
             recent_actions: parsed.recent_actions,
             commit_signal: parsed.commit_signal,
+            action_cues,
         },
         stats: Stats {
             events_seen: parsed.events_seen,
@@ -200,6 +301,57 @@ pub fn extract(
         generated_at: Utc::now().to_rfc3339(),
         raw_events: parsed.raw_events,
     })
+}
+
+pub(crate) fn action_cues_for_snapshot(
+    commit_signal: Option<&CommitSignal>,
+    awaiting_user_input: bool,
+) -> Vec<ActionCue> {
+    let mut cues = Vec::new();
+
+    if awaiting_user_input {
+        cues.push(ActionCue::active(
+            ActionCueKind::AwaitingUser,
+            &["awaiting_user_input"],
+        ));
+    }
+
+    let Some(signal) = commit_signal else {
+        return cues;
+    };
+
+    if signal.candidate {
+        cues.push(ActionCue::active(
+            ActionCueKind::CommitReady,
+            &[
+                "edit_seen",
+                "validation_succeeded",
+                "dirty_tree_checked_after_latest_edit",
+                "commit_not_seen_after_latest_edit",
+            ],
+        ));
+    } else if signal.edited && !signal.validated && !signal.commit_seen {
+        cues.push(ActionCue::active(
+            ActionCueKind::ValidationMissingAfterEdit,
+            &[
+                "edit_seen",
+                "fresh_validation_not_seen",
+                "commit_not_seen_after_latest_edit",
+            ],
+        ));
+    } else if signal.edited && signal.validated && !signal.dirty_checked && !signal.commit_seen {
+        cues.push(ActionCue::active(
+            ActionCueKind::DirtyCheckMissing,
+            &[
+                "edit_seen",
+                "validation_succeeded",
+                "dirty_tree_check_not_seen_after_latest_edit",
+                "commit_not_seen_after_latest_edit",
+            ],
+        ));
+    }
+
+    cues
 }
 
 fn is_false(value: &bool) -> bool {

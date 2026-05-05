@@ -12,7 +12,10 @@ use clawgs::emit::protocol::{
     HelloMessage, RestState, SessionSnapshot, SessionState, SyncRequest, SyncResultMessage,
     ThoughtConfig, ThoughtSource, ThoughtState,
 };
-use clawgs::{extract, AgentTool, ExtractOptions, ExtractOutput};
+use clawgs::{
+    extract, ActionCue, ActionCueConfidence, ActionCueKind, ActionCueSource, ActionCueStatus,
+    AgentTool, ExtractOptions, ExtractOutput,
+};
 
 const CLAUDE_SAMPLE_PATH: &str = "embedded:examples/demo/claude-sample.jsonl";
 const CODEX_SAMPLE_PATH: &str = "embedded:examples/demo/codex-sample.jsonl";
@@ -148,9 +151,23 @@ fn demo_sync_request() -> SyncRequest {
             context_limit: 256_000,
             last_activity_at: now - Duration::seconds(2),
             rest_state: RestState::Active,
-            commit_candidate: false,
+            commit_candidate: true,
+            action_cues: vec![demo_commit_ready_cue()],
         }],
     )
+}
+
+fn demo_commit_ready_cue() -> ActionCue {
+    ActionCue {
+        kind: ActionCueKind::CommitReady,
+        status: ActionCueStatus::Active,
+        source: ActionCueSource::Transcript,
+        confidence: ActionCueConfidence::Deterministic,
+        evidence: ActionCue::expected_evidence(ActionCueKind::CommitReady)
+            .iter()
+            .map(|item| item.to_string())
+            .collect(),
+    }
 }
 
 fn normalize_demo_stream_ids(response: &mut SyncResultMessage) {

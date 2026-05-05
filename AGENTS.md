@@ -1,10 +1,10 @@
 # AGENTS.md
 
 ## Project Shape
-- `clawgs` is a Rust 2021 CLI/library crate (`rust-version = 1.74`) for normalizing Claude Code and Codex JSONL transcripts into `clawgs.v1` snapshots and emitting live `clawgs.emit.v1` NDJSON status updates.
+- `clawgs` is a Rust 2021 CLI/library crate (`rust-version = 1.85`) for normalizing Claude Code and Codex JSONL transcripts into `clawgs.v2` snapshots and emitting live `clawgs.emit.v2` NDJSON status updates.
 - CLI entry point: `src/main.rs`, with subcommands `demo`, `extract`, `emit --stdio`, `tmux-emit`, `tmux-notify`, and `defaults`.
 - Library entry point: `src/lib.rs`, exporting transcript discovery, extraction, parsers, emit protocol/engine, and tmux scanning.
-- Public contracts are documented in `references/schema-v1.md` and `references/emit-protocol-v1.md`; keep schema/protocol changes deliberate and tested.
+- Public contracts are documented in `references/schema-v2.md` and `references/emit-protocol-v2.md`; keep schema/protocol changes deliberate and tested.
 
 ## Commands
 - Install/build release binary: `bash scripts/install.sh` or `cargo build --release`.
@@ -43,7 +43,7 @@
 
 ## Coding Notes
 - Prefer existing patterns: `anyhow::Result` with context at I/O boundaries, `serde` structs for wire contracts, `clap` derive for CLI, and small parser helpers over ad hoc string parsing.
-- Preserve contract stability: `clawgs.v1` and `clawgs.emit.v1` are downstream-facing APIs.
+- Preserve contract stability: `clawgs.v1`/`clawgs.v2` and `clawgs.emit.v1`/`clawgs.emit.v2` are downstream-facing APIs.
 - Parser code is intentionally tolerant of malformed JSONL lines; preserve `malformed_lines_skipped` behavior unless changing the schema intentionally.
 - Keep demo paths zero-config: `demo extract` and `demo emit` must not require private logs, tmux, or model credentials.
 - `tmux-emit` can call external model backends depending on config/env; demos should stay local-only.

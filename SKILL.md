@@ -40,7 +40,7 @@ target/release/clawgs emit --stdio
 ```
 
 Send one JSON `sync` message per line on stdin, read `sync_result` lines from stdout.
-Protocol details are in [references/emit-protocol-v1.md](references/emit-protocol-v1.md).
+Protocol details are in [references/emit-protocol-v2.md](references/emit-protocol-v2.md).
 
 ## Tmux Emit
 
@@ -90,4 +90,4 @@ Output shape:
 
 ## Output Contract
 
-Schema version is `clawgs.v1`. Full field definitions and sample output are in [references/schema-v1.md](references/schema-v1.md).
+Schema version is `clawgs.v2`. Full field definitions and sample output are in [references/schema-v2.md](references/schema-v2.md).

@@ -84,13 +84,13 @@ pub fn validate_backend_credentials(backend: ModelBackend) -> Result<(), String>
             Ok(())
         }
         ModelBackend::CodexCli => {
-            if !codex_command_available() {
+            if !command_available(CODEX_BIN_ENV, "codex") {
                 return Err(format!("{}: codex binary not found", backend.as_str()));
             }
             Ok(())
         }
         ModelBackend::ClaudeCli => {
-            if !claude_command_available() {
+            if !command_available(CLAUDE_BIN_ENV, "claude") {
                 return Err(format!("{}: claude binary not found", backend.as_str()));
             }
             Ok(())
@@ -200,7 +200,7 @@ fn validated_codex_setting(env_key: &str, default: &str, allowed: &[&str]) -> St
 impl CodexCliModelClient {
     pub fn new() -> Self {
         Self {
-            bin: codex_bin(),
+            bin: configured_bin(CODEX_BIN_ENV, "codex"),
             runtime_dir: std::env::temp_dir().join(CODEX_RUNTIME_DIR),
             workdir: nonempty_env_var(CODEX_WORKDIR_ENV)
                 .map(PathBuf::from)
@@ -296,7 +296,7 @@ pub struct ClaudeCliModelClient {
 impl ClaudeCliModelClient {
     pub fn new() -> Self {
         Self {
-            bin: claude_bin(),
+            bin: configured_bin(CLAUDE_BIN_ENV, "claude"),
             runtime_dir: std::env::temp_dir().join(CLAUDE_RUNTIME_DIR),
             max_budget: nonempty_env_var(CLAUDE_MAX_BUDGET_ENV)
                 .unwrap_or_else(|| DEFAULT_CLAUDE_CLI_MAX_BUDGET.to_string()),
@@ -372,37 +372,25 @@ impl ModelClient for ClaudeCliModelClient {
 fn auto_detect_model_backend() -> ModelBackend {
     if nonempty_env_var("OPENROUTER_API_KEY").is_some() {
         ModelBackend::OpenRouter
-    } else if claude_command_available() {
+    } else if command_available(CLAUDE_BIN_ENV, "claude") {
         ModelBackend::ClaudeCli
-    } else if codex_command_available() {
+    } else if command_available(CODEX_BIN_ENV, "codex") {
         ModelBackend::CodexCli
     } else {
         ModelBackend::OpenRouter
     }
 }
 
-fn codex_command_available() -> bool {
-    Command::new(codex_bin())
+fn command_available(env_key: &str, default: &str) -> bool {
+    Command::new(configured_bin(env_key, default))
         .arg("--version")
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
 }
 
-fn claude_command_available() -> bool {
-    Command::new(claude_bin())
-        .arg("--version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-fn codex_bin() -> String {
-    nonempty_env_var(CODEX_BIN_ENV).unwrap_or_else(|| "codex".to_string())
-}
-
-fn claude_bin() -> String {
-    nonempty_env_var(CLAUDE_BIN_ENV).unwrap_or_else(|| "claude".to_string())
+fn configured_bin(env_key: &str, default: &str) -> String {
+    nonempty_env_var(env_key).unwrap_or_else(|| default.to_string())
 }
 
 fn candidate_models(model_override: Option<&str>, backend: ModelBackend) -> Vec<String> {

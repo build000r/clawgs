@@ -80,6 +80,8 @@ Representative commits:
 - Terminated model backend subprocesses when prompt writes fail so failed
   backend calls do not leave sleeping children behind.
 - Refreshed the lockfile to the current `rustls-webpki` patch release.
+- Pinned the `time` transitive dependency line to Rust-1.85-compatible
+  versions so CI enforces the crate's declared MSRV.
 
 Representative commits:
 

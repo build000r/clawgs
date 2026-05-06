@@ -702,7 +702,9 @@ fn dirty_check_command(command: &str) -> bool {
     trimmed == "git status"
         || trimmed.starts_with("git status ")
         || trimmed == "git diff"
-        || (trimmed.starts_with("git diff ") && !command_has_arg(trimmed, "--check"))
+        || (trimmed.starts_with("git diff ")
+            && !command_has_arg(trimmed, "--check")
+            && !git_diff_uses_historical_revision(trimmed))
 }
 
 fn commit_command(command: &str) -> bool {
@@ -713,6 +715,13 @@ fn commit_command(command: &str) -> bool {
 
 fn command_has_arg(command: &str, arg: &str) -> bool {
     command.split_whitespace().any(|token| token == arg)
+}
+
+fn git_diff_uses_historical_revision(command: &str) -> bool {
+    command
+        .split_whitespace()
+        .skip(2)
+        .any(|token| token.contains("..") || token.contains('~') || token.contains('^'))
 }
 
 fn validation_command(command: &str) -> bool {
@@ -1232,6 +1241,9 @@ mod tests {
         assert!(dirty_check_command("  git diff  "));
         assert!(!dirty_check_command("git diff --check"));
         assert!(!dirty_check_command("git diff --cached --check"));
+        assert!(!dirty_check_command("git diff origin/main..HEAD"));
+        assert!(!dirty_check_command("git diff main...feature"));
+        assert!(!dirty_check_command("git diff HEAD~1"));
         assert!(!dirty_check_command("git diffstat"));
         assert!(!dirty_check_command("git log"));
     }

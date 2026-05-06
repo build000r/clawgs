@@ -18,6 +18,8 @@ use clawgs::emit::protocol::{ErrorMessage, HelloMessage, SyncRequest, SyncResult
 use clawgs::tmux::TmuxScanTracker;
 use clawgs::{extract, resolve_input, AgentTool, ExtractOptions, ToolSelection};
 
+const MAX_TMUX_INTERVAL_MS: u64 = 24 * 60 * 60 * 1000;
+
 #[derive(Debug, Parser)]
 #[command(name = "clawgs")]
 #[command(about = "Extract structured JSON snapshots from Claude/Codex JSONL transcripts")]
@@ -135,7 +137,7 @@ struct DemoEmitArgs {
 
 #[derive(Debug, Args)]
 struct TmuxEmitArgs {
-    /// Polling interval in milliseconds between full pane rescans.
+    /// Polling interval in milliseconds between full pane rescans (1 to 86400000).
     #[arg(long, default_value_t = 15_000)]
     interval_ms: u64,
 
@@ -431,6 +433,14 @@ fn validate_extract_limits(
     Ok(())
 }
 
+fn validate_tmux_emit_args(args: &TmuxEmitArgs) -> Result<()> {
+    if args.interval_ms == 0 {
+        anyhow::bail!("--interval-ms must be greater than 0");
+    }
+    next_tmux_reconcile_deadline(args.interval_ms)?;
+    Ok(())
+}
+
 fn print_json<T: Serialize>(value: &T, pretty: bool) -> Result<()> {
     if pretty {
         println!("{}", serde_json::to_string_pretty(value)?);
@@ -448,6 +458,8 @@ fn demo_tool(tool: DemoToolArg) -> AgentTool {
 }
 
 fn run_tmux_emit(args: TmuxEmitArgs) -> Result<()> {
+    validate_tmux_emit_args(&args)?;
+
     let model_client = build_model_client()
         .map_err(|error| anyhow::anyhow!("failed to initialize model client: {error}"))?;
     let mut engine = EmitEngine::new(model_client);
@@ -506,7 +518,7 @@ fn run_tmux_emit_loop<W: Write>(
     tmux_config: &clawgs::emit::protocol::ThoughtConfig,
     socket: &UnixDatagram,
 ) -> Result<()> {
-    let mut next_reconcile_at = Instant::now() + Duration::from_millis(interval_ms);
+    let mut next_reconcile_at = next_tmux_reconcile_deadline(interval_ms)?;
     let mut buf = [0u8; 512];
 
     loop {
@@ -515,8 +527,18 @@ fn run_tmux_emit_loop<W: Write>(
         }
 
         emit_tmux_scan(stdout, engine, tracker, seq, max_capture_lines, tmux_config)?;
-        next_reconcile_at = Instant::now() + Duration::from_millis(interval_ms);
+        next_reconcile_at = next_tmux_reconcile_deadline(interval_ms)?;
     }
+}
+
+fn next_tmux_reconcile_deadline(interval_ms: u64) -> Result<Instant> {
+    if interval_ms > MAX_TMUX_INTERVAL_MS {
+        anyhow::bail!("--interval-ms must be at most {MAX_TMUX_INTERVAL_MS}");
+    }
+
+    Instant::now()
+        .checked_add(Duration::from_millis(interval_ms))
+        .ok_or_else(|| anyhow::anyhow!("--interval-ms is too large"))
 }
 
 fn tmux_emit_config(args: &TmuxEmitArgs) -> Result<clawgs::emit::protocol::ThoughtConfig> {
@@ -832,6 +854,38 @@ mod tests {
             tmux_socket_timeout(future) <= Duration::from_millis(1_000),
             "future deadlines are capped to the reconcile poll ceiling"
         );
+    }
+
+    #[test]
+    fn tmux_emit_args_reject_zero_interval() {
+        let args = TmuxEmitArgs {
+            interval_ms: 0,
+            max_capture_lines: 200,
+            once: false,
+            model: String::new(),
+            config_json: None,
+            socket: None,
+        };
+
+        let error = validate_tmux_emit_args(&args).expect_err("zero interval should fail");
+        assert!(error
+            .to_string()
+            .contains("--interval-ms must be greater than 0"));
+    }
+
+    #[test]
+    fn tmux_emit_args_reject_too_large_interval() {
+        let args = TmuxEmitArgs {
+            interval_ms: u64::MAX,
+            max_capture_lines: 200,
+            once: false,
+            model: String::new(),
+            config_json: None,
+            socket: None,
+        };
+
+        let error = validate_tmux_emit_args(&args).expect_err("huge interval should fail");
+        assert!(error.to_string().contains("--interval-ms must be at most"));
     }
 
     #[test]

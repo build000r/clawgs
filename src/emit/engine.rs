@@ -1556,22 +1556,18 @@ fn resolved_claim_snapshot(
     cwd: &Path,
     claimed: &Path,
 ) -> Option<(Option<Snapshot>, Option<PathBuf>)> {
-    resolve_input(selection, cwd, Some(claimed))
-        .ok()
-        .map(|resolved| {
-            (
-                extract(
-                    resolved.tool,
-                    &resolved.path,
-                    cwd,
-                    resolved.discovered,
-                    &ExtractOptions::default(),
-                )
-                .ok()
-                .map(|output| output.snapshot),
-                Some(claimed.to_path_buf()),
-            )
-        })
+    let resolved = resolve_input(selection, cwd, Some(claimed)).ok()?;
+    let snapshot = extract(
+        resolved.tool,
+        &resolved.path,
+        cwd,
+        resolved.discovered,
+        &ExtractOptions::default(),
+    )
+    .ok()?
+    .snapshot;
+
+    Some((Some(snapshot), Some(claimed.to_path_buf())))
 }
 
 fn preferred_context_snapshot(
@@ -3320,6 +3316,53 @@ mod tests {
                 .and_then(|path| path.file_name())
                 .and_then(|name| name.to_str()),
             Some("rollout-b.jsonl")
+        );
+    }
+
+    #[test]
+    fn unusable_claimed_transcript_falls_back_to_valid_candidate() {
+        let _lock = crate::test_support::home_env_lock()
+            .lock()
+            .expect("home lock");
+        let home = tempdir().expect("tempdir");
+        std::env::set_var("HOME", home.path());
+
+        let cwd = PathBuf::from("/tmp/project-with-stale-claim");
+        let codex_day = home
+            .path()
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("03")
+            .join("08");
+        fs::create_dir_all(&codex_day).expect("create codex dir");
+        let valid = codex_day.join("rollout-valid.jsonl");
+        fs::write(
+            &valid,
+            format!(
+                concat!(
+                    "{{\"type\":\"session_meta\",\"payload\":{{\"cwd\":\"{}\"}}}}\n",
+                    "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"fresh valid transcript\"}}}}\n"
+                ),
+                cwd.display()
+            ),
+        )
+        .expect("write valid codex transcript");
+        let bad_claim = home.path().join("stale-claim.jsonl");
+        fs::create_dir(&bad_claim).expect("create unreadable claim substitute");
+
+        let now = Utc::now();
+        let mut session = sample_session(now);
+        session.tool = Some("codex".to_string());
+        session.cwd = cwd.display().to_string();
+
+        let (snapshot, resolved_path) =
+            context_snapshot_for_session_with_claim(&session, Some(&bad_claim), false);
+
+        assert_eq!(resolved_path, Some(valid));
+        assert_eq!(
+            snapshot.and_then(|snapshot| snapshot.user_task),
+            Some("fresh valid transcript".to_string())
         );
     }
 

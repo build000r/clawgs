@@ -53,9 +53,14 @@ Representative commits:
 - Added Codex task-event extraction.
 - Tightened i18n and commit-signal heuristics.
 - Fixed markup-prefixed user replies so they clear `awaiting_user`.
+- Kept live emit sessions from sticking to stale claimed transcripts when a
+  valid newer discovery candidate is available.
 - Introduced stateful tmux scan tracking.
 - Batched tmux capture into one invocation and nonce-marked capture batches.
 - Avoided zero socket timeouts in tmux notification flows.
+- Rejected invalid `tmux-emit --interval-ms` values before scheduling.
+- Avoided treating historical `git diff` ranges as dirty-tree proof in Codex
+  action-cue extraction.
 
 Representative commits:
 
@@ -72,6 +77,9 @@ Representative commits:
   emit paths.
 - Reduced CRAP hotspots through helper extraction and targeted tests.
 - Covered model client, engine, protocol, tmux, parser, and library helpers.
+- Terminated model backend subprocesses when prompt writes fail so failed
+  backend calls do not leave sleeping children behind.
+- Refreshed the lockfile to the current `rustls-webpki` patch release.
 
 Representative commits:
 

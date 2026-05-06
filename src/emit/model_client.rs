@@ -458,6 +458,7 @@ struct SubprocessSpec<'a> {
     label: &'a str,
 }
 
+#[derive(Debug)]
 struct SubprocessOutput {
     stdout: String,
     stderr: String,
@@ -491,15 +492,16 @@ fn run_subprocess_capturing(spec: SubprocessSpec<'_>) -> Result<SubprocessOutput
         .spawn()
         .map_err(|error| format!("failed to spawn {}: {error}", spec.label))?;
 
-    {
-        let Some(stdin) = child.stdin.as_mut() else {
-            return Err(format!("{} missing stdin pipe", spec.label));
-        };
-        stdin
-            .write_all(spec.stdin_payload)
-            .map_err(|error| format!("failed to write {} prompt: {error}", spec.label))?;
+    let Some(mut stdin) = child.stdin.take() else {
+        terminate_child(&mut child);
+        return Err(format!("{} missing stdin pipe", spec.label));
+    };
+    if let Err(error) = stdin.write_all(spec.stdin_payload) {
+        drop(stdin);
+        terminate_child(&mut child);
+        return Err(format!("failed to write {} prompt: {error}", spec.label));
     }
-    drop(child.stdin.take());
+    drop(stdin);
 
     let status = wait_with_timeout(&mut child, spec.timeout, spec.label)?;
     let stdout = fs::read_to_string(spec.stdout_path).unwrap_or_default();
@@ -509,6 +511,11 @@ fn run_subprocess_capturing(spec: SubprocessSpec<'_>) -> Result<SubprocessOutput
         stderr,
         success: status.success(),
     })
+}
+
+fn terminate_child(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn wait_with_timeout(
@@ -698,9 +705,10 @@ mod tests {
     use super::{
         build_codex_exec_args, build_openrouter_request_body, default_model_for_backend,
         extract_openrouter_content, failure_preview, interpret_openrouter_response,
-        pick_nonempty_or_fallback, thought_models, validate_backend_credentials,
-        validated_codex_setting, ClaudeCliModelClient, CodexCliModelClient, ModelBackend,
-        ModelClient, OpenRouterModelClient, REASONING_EFFORT_ALLOWED, VERBOSITY_ALLOWED,
+        pick_nonempty_or_fallback, run_subprocess_capturing, thought_models,
+        validate_backend_credentials, validated_codex_setting, ClaudeCliModelClient,
+        CodexCliModelClient, ModelBackend, ModelClient, OpenRouterModelClient, SubprocessSpec,
+        REASONING_EFFORT_ALLOWED, VERBOSITY_ALLOWED,
     };
 
     #[test]
@@ -1054,6 +1062,57 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(&script, permissions).expect("chmod");
         script
+    }
+
+    fn process_exists(pid: &str) -> bool {
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn subprocess_write_failure_terminates_child() {
+        use std::fs;
+        use std::time::Duration;
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("tempdir");
+        let script = write_fake_codex(
+            dir.path(),
+            concat!(
+                "#!/bin/sh\n",
+                "printf '%s' \"$$\" > \"$(dirname \"$0\")/child.pid\"\n",
+                "exec 0<&-\n",
+                "sleep 30\n"
+            ),
+        );
+        let stdout_path = dir.path().join("stdout.log");
+        let stderr_path = dir.path().join("stderr.log");
+        let prompt = vec![b'x'; 1024 * 1024];
+        let script_bin = script.to_string_lossy().into_owned();
+
+        let error = run_subprocess_capturing(SubprocessSpec {
+            bin: &script_bin,
+            args: Vec::new(),
+            stdin_payload: &prompt,
+            stdout_path: &stdout_path,
+            stderr_path: &stderr_path,
+            timeout: Duration::from_secs(5),
+            label: "fake backend",
+        })
+        .expect_err("closed stdin should fail while writing prompt");
+
+        assert!(error.contains("failed to write fake backend prompt"));
+        let pid = fs::read_to_string(dir.path().join("child.pid")).expect("child pid");
+        assert!(
+            !process_exists(pid.trim()),
+            "child must be killed and waited after prompt write failure"
+        );
     }
 
     fn build_codex_test_client(

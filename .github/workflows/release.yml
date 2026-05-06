@@ -60,7 +60,8 @@ jobs:
       - name: Verify package contents
         run: |
           set -euo pipefail
-          cargo package --locked --list > package-files.txt
+          package_files="${RUNNER_TEMP}/package-files.txt"
+          cargo package --locked --list > "${package_files}"
           required=(
             "README.md"
             "LICENSE"
@@ -71,12 +72,12 @@ jobs:
             "references/clawgs.emit.v2.schema.json"
           )
           for path in "${required[@]}"; do
-            if ! grep -Fxq "${path}" package-files.txt; then
+            if ! grep -Fxq "${path}" "${package_files}"; then
               echo "missing package file: ${path}" >&2
               exit 1
             fi
           done
-          if grep -q '^\.github/' package-files.txt; then
+          if grep -q '^\.github/' "${package_files}"; then
             echo ".github files should not be included in the crate package" >&2
             exit 1
           fi

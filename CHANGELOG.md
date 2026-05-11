@@ -2,18 +2,18 @@
 
 All notable user-facing and agent-facing changes are documented here.
 
-This changelog is reconstructed from git tags, commits, GitHub release metadata,
-and repository docs. GitHub Releases are called out separately from plain git
-tags because this repo currently has tags but no GitHub Release objects.
+This changelog is reconstructed from git tags, commits, GitHub Release metadata,
+and repository docs. GitHub Releases are called out separately when they differ
+from plain git tags.
 
 ## Version Timeline
 
 | Version | Date | Status | Evidence |
 | --- | --- | --- | --- |
-| `0.2.0` | 2026-05-05 | Prepared, not tagged in this checkout | [`Cargo.toml`](https://github.com/build000r/clawgs/blob/main/Cargo.toml), [`v0.1.0..main`](https://github.com/build000r/clawgs/compare/v0.1.0...main) |
+| `0.2.0` | 2026-05-06 | Tagged and published as a GitHub Release from `7856897` | [`v0.2.0`](https://github.com/build000r/clawgs/releases/tag/v0.2.0), [`7856897`](https://github.com/build000r/clawgs/commit/7856897) |
 | `0.1.0` | 2026-04-06 | Git tag only; no GitHub Release object found | [`v0.1.0`](https://github.com/build000r/clawgs/releases/tag/v0.1.0) |
 
-## [0.2.0] - 2026-05-05
+## [0.2.0] - 2026-05-06
 
 `0.2.0` is the canonical v2 schema/protocol release. It promotes the public
 contract from a v1 snapshot extractor into a documented `clawgs.v2` extract
@@ -92,7 +92,7 @@ Representative commits:
 
 ### Release Readiness
 
-- Added this changelog from the `v0.1.0..HEAD` history.
+- Added this changelog from the `v0.1.0..v0.2.0` history.
 - Added release documentation and a GitHub Actions release workflow for tag
   verification and crates.io publishing.
 - Updated local agent/operator release metadata so future handoffs no longer
@@ -108,5 +108,5 @@ which addressed pre-publish review fixups in `Cargo.toml` and `README.md`.
 
 No GitHub Release object was found for this version.
 
-[0.2.0]: https://github.com/build000r/clawgs/compare/v0.1.0...main
+[0.2.0]: https://github.com/build000r/clawgs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/build000r/clawgs/releases/tag/v0.1.0

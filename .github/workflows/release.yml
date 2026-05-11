@@ -77,10 +77,28 @@ jobs:
               exit 1
             fi
           done
-          if grep -q '^\.github/' "${package_files}"; then
-            echo ".github files should not be included in the crate package" >&2
-            exit 1
-          fi
+          forbidden_patterns=(
+            '^\.github/'
+            '^\.mcp\.json$'
+            '^\.beads(/|$)'
+            '^\.buildooor(/|$)'
+            '^\.claude(/|$)'
+            '^\.codex(/|$)'
+            '^\.ntm(/|$)'
+            '^\.ubs(/|$)'
+            '^\.drift(/|$)'
+            '^\.apr(/|$)'
+            '(^|/)\.env$'
+            '(^|/)[^/]+\.bak$'
+            '(^|/)\.DS_Store$'
+          )
+          for pattern in "${forbidden_patterns[@]}"; do
+            if grep -Eq "${pattern}" "${package_files}"; then
+              echo "forbidden package path matched ${pattern}:" >&2
+              grep -E "${pattern}" "${package_files}" >&2
+              exit 1
+            fi
+          done
 
       - name: Dry-run publish
         run: cargo publish --locked --dry-run

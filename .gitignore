@@ -2,11 +2,14 @@ target/
 .DS_Store
 lcov.info
 .ubs/
+*.bak
+*.orig
 
 .mutate/
 mutants.out/
 .ntm/
 refactor/
+.buildooor/
 
 # Per-workstation agent skill symlinks (not project content).
 .claude/

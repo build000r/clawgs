@@ -136,6 +136,14 @@ bash scripts/check.sh
 
 That builds `target/release/clawgs` and verifies the binary with a smoke test. You can also run `cargo install --path .` from inside a checkout.
 
+`target/release/clawgs` is also the stable source-checkout path for downstream
+tools. For example, Swimmers auto-discovers a sibling checkout at
+`../clawgs/target/release/clawgs` before falling back to `clawgs` on `PATH`.
+When using Swimmers and Clawgs side by side from source, run
+`bash scripts/install.sh` after cloning or updating Clawgs. A debug-only
+`cargo build` leaves `target/debug/clawgs`; use `CLAWGS_BIN=/path/to/clawgs`
+only when you intentionally want a non-default binary.
+
 ### What Is Not Published Yet
 
 There is no Homebrew formula, no npm package, no PyPI package, and no curl installer yet. crates.io is currently the only published distribution channel.

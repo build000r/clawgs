@@ -14,3 +14,8 @@ refactor/
 # Per-workstation agent skill symlinks (not project content).
 .claude/
 .codex/
+
+# beads local database
+.beads/*.db
+.beads/*.db-shm
+.beads/*.db-wal

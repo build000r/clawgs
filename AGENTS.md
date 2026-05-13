@@ -8,7 +8,8 @@
 
 ## Commands
 - Install/build release binary: `bash scripts/install.sh` or `cargo build --release`.
-- Smoke check installed release binary: `bash scripts/check.sh`.
+- Smoke check installed release binary: `bash scripts/check.sh` (validates
+  `--help`, `defaults`, and fixture extraction).
 - Build dev: `cargo build`.
 - Test: `cargo test`.
 - Format check: `cargo fmt -- --check`.
@@ -28,6 +29,9 @@
 - `tests/`: integration tests and JSONL fixtures; `tests/artifacts/perf/` holds performance artifacts.
 - `scripts/`: install/check scripts plus performance scenario runners.
 - `references/tmux-clawgs.conf`: tmux hook snippet; it writes runtime logs under `$HOME/.tmux/`.
+- Downstream source checkouts such as Swimmers discover the stable local binary
+  at `target/release/clawgs`; run `bash scripts/install.sh` when that path is
+  missing rather than relying on a debug-only `cargo build`.
 
 ## Data, Config, State
 - Transcript discovery reads `$HOME/.claude/projects/.../*.jsonl` and `$HOME/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`.

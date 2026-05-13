@@ -16,6 +16,16 @@ if ! "$bin_path" --help >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! defaults_output="$("$bin_path" defaults 2>/dev/null)"; then
+  echo "error: clawgs defaults failed" >&2
+  exit 1
+fi
+
+if ! printf '%s' "$defaults_output" | grep -q '"backend"'; then
+  echo "error: clawgs defaults returned unexpected output" >&2
+  exit 1
+fi
+
 tmp_file="$(mktemp)"
 trap 'rm -f "$tmp_file"' EXIT
 

@@ -19,9 +19,9 @@ use super::model_client::{
     build_model_client_for, validate_backend_credentials, ModelBackend, ModelClient,
 };
 use super::protocol::{
-    BubblePrecedence, CadenceTier, ContextSource, CueInfo, RestState, SessionSnapshot,
-    SessionState, SyncMetrics, SyncRequest, SyncResultMessage, ThoughtConfig, ThoughtSource,
-    ThoughtState, ThoughtUpdate, TimingInfo,
+    BubblePrecedence, CadenceTier, ContextSource, CueInfo, RestState, SessionDelta,
+    SessionDeltaField, SessionDeltaKind, SessionSnapshot, SessionState, SyncMetrics, SyncRequest,
+    SyncResultMessage, ThoughtConfig, ThoughtSource, ThoughtState, ThoughtUpdate, TimingInfo,
 };
 
 const SUMMARY_HISTORY_CAP: usize = 10;
@@ -79,6 +79,107 @@ fn compute_transcript_group_counts(sessions: &[SessionSnapshot]) -> HashMap<Stri
     counts
 }
 
+fn compute_session_deltas(
+    per_session: &mut HashMap<String, SessionRuntimeState>,
+    request: &SyncRequest,
+    transcript_group_counts: &HashMap<String, usize>,
+) -> Vec<SessionDelta> {
+    let active_ids: HashSet<&str> = request
+        .sessions
+        .iter()
+        .map(|session| session.session_id.as_str())
+        .collect();
+    let mut removed_ids: Vec<String> = per_session
+        .keys()
+        .filter(|session_id| !active_ids.contains(session_id.as_str()))
+        .cloned()
+        .collect();
+    removed_ids.sort();
+
+    let mut deltas: Vec<SessionDelta> = removed_ids
+        .into_iter()
+        .map(|session_id| SessionDelta {
+            session_id,
+            kind: SessionDeltaKind::Removed,
+            state: None,
+            tool: None,
+            cwd: None,
+            changed_fields: Vec::new(),
+            transcript_ambiguous: false,
+        })
+        .collect();
+
+    for session in &request.sessions {
+        let state = per_session
+            .entry(session.session_id.clone())
+            .or_insert_with(|| SessionRuntimeState::initialize_from_session(session, request.now));
+        let current = ObservedSessionFacts::from_session(session);
+        let previous = state.last_observed.as_ref();
+        let changed_fields = session_changed_fields(previous, &current);
+        let kind = session_delta_kind(previous, session, &changed_fields);
+
+        deltas.push(SessionDelta {
+            session_id: session.session_id.clone(),
+            kind,
+            state: Some(session.state),
+            tool: session.tool.clone(),
+            cwd: Some(session.cwd.clone()),
+            changed_fields,
+            transcript_ambiguous: transcript_group_is_ambiguous(session, transcript_group_counts),
+        });
+        state.last_observed = Some(current);
+    }
+
+    deltas
+}
+
+fn session_delta_kind(
+    previous: Option<&ObservedSessionFacts>,
+    session: &SessionSnapshot,
+    changed_fields: &[SessionDeltaField],
+) -> SessionDeltaKind {
+    if session.exited || session.state == SessionState::Exited {
+        SessionDeltaKind::Exited
+    } else if previous.is_none() {
+        SessionDeltaKind::Started
+    } else if changed_fields.is_empty() {
+        SessionDeltaKind::Unchanged
+    } else {
+        SessionDeltaKind::Changed
+    }
+}
+
+fn session_changed_fields(
+    previous: Option<&ObservedSessionFacts>,
+    current: &ObservedSessionFacts,
+) -> Vec<SessionDeltaField> {
+    let Some(previous) = previous else {
+        return Vec::new();
+    };
+
+    let mut fields = Vec::new();
+    if previous.state != current.state {
+        fields.push(SessionDeltaField::State);
+    }
+    if previous.exited != current.exited {
+        fields.push(SessionDeltaField::Exited);
+    }
+    if previous.tool != current.tool {
+        fields.push(SessionDeltaField::Tool);
+    }
+    if previous.cwd != current.cwd {
+        fields.push(SessionDeltaField::Cwd);
+    }
+    if previous.replay_fingerprint != current.replay_fingerprint {
+        fields.push(SessionDeltaField::ReplayText);
+    }
+    if previous.last_activity_at != current.last_activity_at {
+        fields.push(SessionDeltaField::Activity);
+    }
+
+    fields
+}
+
 struct SessionRuntimeState {
     summary_history: Vec<String>,
     last_terminal_context: Option<String>,
@@ -97,6 +198,30 @@ struct SessionRuntimeState {
     claimed_jsonl_path: Option<PathBuf>,
     claimed_cwd: Option<String>,
     emission_seq: u64,
+    last_observed: Option<ObservedSessionFacts>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ObservedSessionFacts {
+    state: SessionState,
+    exited: bool,
+    tool: Option<String>,
+    cwd: String,
+    replay_fingerprint: u64,
+    last_activity_at: DateTime<Utc>,
+}
+
+impl ObservedSessionFacts {
+    fn from_session(session: &SessionSnapshot) -> Self {
+        Self {
+            state: session.state,
+            exited: session.exited,
+            tool: session.tool.clone(),
+            cwd: session.cwd.clone(),
+            replay_fingerprint: hash_string(&session.replay_text),
+            last_activity_at: session.last_activity_at,
+        }
+    }
 }
 
 impl SessionRuntimeState {
@@ -131,6 +256,7 @@ impl SessionRuntimeState {
             claimed_jsonl_path: None,
             claimed_cwd: None,
             emission_seq: 0,
+            last_observed: None,
         }
     }
 
@@ -209,6 +335,9 @@ impl EmitEngine {
     pub fn sync(&mut self, request: &SyncRequest) -> SyncResultMessage {
         let mut updates = Vec::new();
         let mut metrics = SyncMetrics::default();
+        let transcript_group_counts = compute_transcript_group_counts(&request.sessions);
+        let session_deltas =
+            compute_session_deltas(&mut self.per_session, request, &transcript_group_counts);
 
         let active_ids: HashSet<&str> = request
             .sessions
@@ -220,10 +349,8 @@ impl EmitEngine {
 
         if !request.config.enabled {
             self.clear_all_sessions(request, &mut updates, &mut metrics);
-            return self.build_sync_result(&request.id, updates, metrics);
+            return self.build_sync_result(&request.id, updates, metrics, session_deltas);
         }
-
-        let transcript_group_counts = compute_transcript_group_counts(&request.sessions);
 
         let backend = request
             .config
@@ -240,7 +367,7 @@ impl EmitEngine {
                     &mut metrics,
                 );
             }
-            return self.build_sync_result(&request.id, updates, metrics);
+            return self.build_sync_result(&request.id, updates, metrics, session_deltas);
         }
 
         let Some(model_client) = self.clients.get(&backend).map(|client| &**client) else {
@@ -248,7 +375,7 @@ impl EmitEngine {
                 "{}: model client cache missing after initialization",
                 backend.as_str()
             ));
-            return self.build_sync_result(&request.id, updates, metrics);
+            return self.build_sync_result(&request.id, updates, metrics, session_deltas);
         };
         let stream_instance_id = self.stream_instance_id.clone();
 
@@ -265,7 +392,7 @@ impl EmitEngine {
             );
         }
 
-        self.build_sync_result(&request.id, updates, metrics)
+        self.build_sync_result(&request.id, updates, metrics, session_deltas)
     }
 
     fn build_sync_result(
@@ -273,6 +400,7 @@ impl EmitEngine {
         request_id: &str,
         updates: Vec<ThoughtUpdate>,
         metrics: SyncMetrics,
+        session_deltas: Vec<SessionDelta>,
     ) -> SyncResultMessage {
         SyncResultMessage::new(
             request_id.to_string(),
@@ -280,6 +408,7 @@ impl EmitEngine {
             updates,
             metrics,
         )
+        .with_session_deltas(session_deltas)
     }
 
     /// Ensures `self.clients[backend]` is populated. Returns `Err` with a
@@ -3130,11 +3259,68 @@ mod tests {
             config: ThoughtConfig::default(),
             sessions: vec![],
         };
-        engine.sync(&request2);
+        let result = engine.sync(&request2);
         assert!(
             !engine.per_session.contains_key("sess-1"),
             "state and claim should be dropped when session removed"
         );
+        assert_eq!(result.session_deltas.len(), 1);
+        assert_eq!(result.session_deltas[0].session_id, "sess-1");
+        assert_eq!(result.session_deltas[0].kind, SessionDeltaKind::Removed);
+    }
+
+    #[test]
+    fn session_deltas_report_started_changed_and_unchanged() {
+        let now = Utc::now();
+        let mut engine = mock_engine("disabled");
+        let config = ThoughtConfig {
+            enabled: false,
+            ..ThoughtConfig::default()
+        };
+
+        let first = sample_session(now);
+        let first_result = engine.sync(&SyncRequest {
+            id: "req-1".to_string(),
+            now,
+            config: config.clone(),
+            sessions: vec![first.clone()],
+        });
+        assert_eq!(first_result.session_deltas.len(), 1);
+        assert_eq!(
+            first_result.session_deltas[0].kind,
+            SessionDeltaKind::Started
+        );
+        assert!(first_result.session_deltas[0].changed_fields.is_empty());
+
+        let mut changed = first;
+        changed.replay_text.push_str("\nnew output");
+        changed.last_activity_at = now + Duration::seconds(5);
+        let changed_result = engine.sync(&SyncRequest {
+            id: "req-2".to_string(),
+            now: now + Duration::seconds(5),
+            config: config.clone(),
+            sessions: vec![changed.clone()],
+        });
+        assert_eq!(
+            changed_result.session_deltas[0].kind,
+            SessionDeltaKind::Changed
+        );
+        assert_eq!(
+            changed_result.session_deltas[0].changed_fields,
+            vec![SessionDeltaField::ReplayText, SessionDeltaField::Activity]
+        );
+
+        let unchanged_result = engine.sync(&SyncRequest {
+            id: "req-3".to_string(),
+            now: now + Duration::seconds(6),
+            config,
+            sessions: vec![changed],
+        });
+        assert_eq!(
+            unchanged_result.session_deltas[0].kind,
+            SessionDeltaKind::Unchanged
+        );
+        assert!(unchanged_result.session_deltas[0].changed_fields.is_empty());
     }
 
     #[test]
@@ -3408,6 +3594,11 @@ mod tests {
 
         assert!(result.updates.is_empty());
         assert!(result.metrics.suppressed > 0);
+        assert_eq!(result.session_deltas.len(), 2);
+        assert!(result
+            .session_deltas
+            .iter()
+            .all(|delta| delta.transcript_ambiguous));
         assert!(engine
             .per_session
             .get("tmux:work:1.0:%1")

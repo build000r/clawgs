@@ -1,6 +1,8 @@
 use std::fs;
+use std::io::Write;
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixDatagram;
 use std::process::Command;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -122,6 +124,12 @@ fn tmux_emit_once_writes_hello_and_sync_result() {
     assert_eq!(result["id"], "tmux-1");
     assert!(result["stream_instance_id"].as_str().is_some());
     assert_eq!(result["metrics"]["sessions_seen"], 2);
+    assert_eq!(
+        result["session_deltas"].as_array().expect("deltas").len(),
+        2
+    );
+    assert_eq!(result["session_deltas"][0]["kind"], "started");
+    assert_eq!(result["session_deltas"][1]["kind"], "started");
     assert!(result["updates"].is_array());
 }
 
@@ -192,7 +200,91 @@ fn tmux_notify_triggers_immediate_rescan() {
     assert_eq!(second["type"], "sync_result");
     assert_eq!(second["id"], "tmux-2");
     assert_eq!(second["stream_instance_id"], stream_instance_id);
+    let deltas = second["session_deltas"].as_array().expect("deltas");
+    assert_eq!(deltas.len(), 2);
+    assert!(deltas.iter().all(|delta| delta["kind"] != "started"));
 
     child.kill().expect("kill tmux emit");
     child.wait().expect("wait for tmux emit");
+}
+
+#[test]
+fn claude_hook_notify_sends_compact_event_to_socket() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let socket_path = temp_dir.path().join("hook.sock");
+    let receiver = UnixDatagram::bind(&socket_path).expect("bind hook receiver");
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set read timeout");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_clawgs"))
+        .arg("claude-hook-notify")
+        .arg("--socket")
+        .arg(&socket_path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn claude-hook-notify");
+
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(
+            br#"{
+              "hook_event_name": "PostToolUse",
+              "session_id": "abc 123",
+              "cwd": "/tmp/project",
+              "transcript_path": "/tmp/transcript.jsonl"
+            }"#,
+        )
+        .expect("write hook json");
+
+    let output = child.wait_with_output().expect("wait for hook notify");
+    assert!(
+        output.status.success(),
+        "hook notify failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+
+    let mut buf = [0u8; 512];
+    let len = receiver.recv(&mut buf).expect("receive hook datagram");
+    let payload = std::str::from_utf8(&buf[..len]).expect("payload utf8");
+    assert_eq!(
+        payload,
+        "claude-code:PostToolUse session=abc_123 cwd=project transcript=transcript.jsonl"
+    );
+}
+
+#[test]
+fn claude_hook_notify_ignores_absent_daemon_and_invalid_stdin() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let socket_path = temp_dir.path().join("missing.sock");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_clawgs"))
+        .arg("claude-hook-notify")
+        .arg("--socket")
+        .arg(&socket_path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn claude-hook-notify");
+
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b"not-json")
+        .expect("write invalid hook input");
+
+    let output = child.wait_with_output().expect("wait for hook notify");
+    assert!(
+        output.status.success(),
+        "hook notify should not fail when daemon is absent: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
 }

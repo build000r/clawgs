@@ -149,8 +149,10 @@ protocol that does not block Bash is a real differentiator.
   agent drift across sessions"
 
 Takeaway: the market is starting to ask for session-aware intelligence, not just
-raw event logging. `clawgs` already has session-boundary awareness through its
-extract snapshot model and tmux pane reconciliation.
+raw event logging. `clawgs` already has shipped session-boundary awareness
+through its extract snapshot model, tmux pane reconciliation, and additive
+`clawgs.emit.v2` `session_deltas` facts for started/changed/exited/removed
+sessions.
 
 ### 3. Heavyweight platform fatigue at the small end
 
@@ -232,6 +234,8 @@ a Python script in the critical path.
 
 The drift-detection RFCs in both Langfuse and the hooks project signal that
 users want to understand how sessions evolve over time, not just see snapshots.
-`clawgs` already does per-pane reconciliation in `tmux-emit`. Extending this to
-track session boundaries, detect stale sessions, and surface "what changed since
-last sync" would fill a gap nobody else is addressing at the CLI level.
+`clawgs` already does per-pane reconciliation in `tmux-emit` and now exposes
+compact `session_deltas` in `clawgs.emit.v2` so downstream tools can see
+started, changed, exited, removed, and transcript-ambiguous sessions without
+parsing raw pane text. The next frontier is richer drift analysis over those
+facts, not proving the basic boundary contract exists.

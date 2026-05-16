@@ -1,0 +1,119 @@
+{
+  "demo": "emit",
+  "hello": {
+    "type": "hello",
+    "protocol": "clawgs.emit.v2",
+    "engine_version": "0.3.0"
+  },
+  "request": {
+    "type": "sync",
+    "id": "demo-sync-1",
+    "now": "2026-04-01T15:30:00Z",
+    "config": {
+      "enabled": true,
+      "model": "",
+      "backend": "",
+      "cadence_hot_ms": 15000,
+      "cadence_warm_ms": 45000,
+      "cadence_cold_ms": 120000,
+      "agent_prompt": "",
+      "terminal_prompt": ""
+    },
+    "sessions": [
+      {
+        "session_id": "demo:codex:1",
+        "state": "busy",
+        "exited": false,
+        "tool": "codex",
+        "cwd": "/demo/project-a",
+        "replay_text": "cargo test --all\ntest parsers::codex::parse_extracts_task_function_call_and_tokens ... ok\ntest emit::protocol::sync_request_serializes_expected_wire_shape ... ok\nreviewing whether raw agent transcripts can collapse into a stable JSON snapshot\nwriting a public demo so new users can see the value without private logs\n",
+        "thought": null,
+        "thought_state": "holding",
+        "thought_source": "carry_forward",
+        "objective_fingerprint": null,
+        "thought_updated_at": null,
+        "token_count": 144379,
+        "context_limit": 256000,
+        "last_activity_at": "2026-04-01T15:29:58Z",
+        "rest_state": "active",
+        "commit_candidate": true,
+        "action_cues": [
+          {
+            "kind": "commit_ready",
+            "status": "active",
+            "source": "transcript",
+            "confidence": "deterministic",
+            "evidence": [
+              "edit_seen",
+              "validation_succeeded",
+              "dirty_tree_checked_after_latest_edit",
+              "commit_not_seen_after_latest_edit"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "response": {
+    "type": "sync_result",
+    "id": "demo-sync-1",
+    "stream_instance_id": "demo-stream",
+    "session_deltas": [
+      {
+        "session_id": "demo:codex:1",
+        "kind": "started",
+        "state": "busy",
+        "tool": "codex",
+        "cwd": "/demo/project-a"
+      }
+    ],
+    "updates": [
+      {
+        "session_id": "demo:codex:1",
+        "stream_instance_id": "demo-stream",
+        "emission_seq": 1,
+        "thought": "Turning raw transcripts into stable session state",
+        "token_count": 144379,
+        "context_limit": 256000,
+        "thought_state": "active",
+        "thought_source": "llm",
+        "objective_changed": true,
+        "bubble_precedence": "thought_first",
+        "at": "2026-04-01T15:30:00Z",
+        "objective_fingerprint": "5792031898659736618",
+        "rest_state": "active",
+        "commit_candidate": true,
+        "action_cues": [
+          {
+            "kind": "commit_ready",
+            "status": "active",
+            "source": "transcript",
+            "confidence": "deterministic",
+            "evidence": [
+              "edit_seen",
+              "validation_succeeded",
+              "dirty_tree_checked_after_latest_edit",
+              "commit_not_seen_after_latest_edit"
+            ]
+          }
+        ],
+        "timing": {
+          "run_started_at": "2026-04-01T15:29:58Z",
+          "run_elapsed_ms": 2000,
+          "idle_elapsed_ms": 2000
+        },
+        "cues": {
+          "cadence_tier": "hot",
+          "cadence_ms": 15000,
+          "next_llm_eligible_at": "2026-04-01T15:30:15Z",
+          "context_source": "terminal"
+        }
+      }
+    ],
+    "metrics": {
+      "sessions_seen": 1,
+      "llm_calls": 1,
+      "suppressed": 0
+    }
+  }
+}

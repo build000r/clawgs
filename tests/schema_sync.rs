@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{Duration, TimeZone, Utc};
+use clawgs::emit::model_client::ModelBackend;
 use clawgs::emit::protocol::{
     BubblePrecedence, CadenceTier, ContextSource, CueInfo, ErrorMessage, HelloMessage, RestState,
-    SessionSnapshot, SessionState, SyncMetrics, SyncRequest, SyncResultMessage, ThoughtConfig,
-    ThoughtSource, ThoughtState, ThoughtUpdate, TimingInfo,
+    SessionDelta, SessionDeltaField, SessionDeltaKind, SessionSnapshot, SessionState, SyncMetrics,
+    SyncRequest, SyncResultMessage, ThoughtConfig, ThoughtSource, ThoughtState, ThoughtUpdate,
+    TimingInfo,
 };
 use clawgs::{
     extract, ActionCue, ActionCueConfidence, ActionCueKind, ActionCueSource, ActionCueStatus,
@@ -28,6 +30,49 @@ fn validate(schema: &Value, instance: &Value) {
         let messages: Vec<String> = errors.map(|error| error.to_string()).collect();
         panic!("schema validation failed:\n{}", messages.join("\n"));
     };
+}
+
+fn string_array_at(schema: &Value, pointer: &str) -> Vec<String> {
+    schema
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("missing array at {pointer}"))
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .unwrap_or_else(|| panic!("non-string value at {pointer}: {value:?}"))
+                .to_string()
+        })
+        .collect()
+}
+
+fn action_cue_schema_evidence(schema: &Value, kind: ActionCueKind) -> Vec<String> {
+    let all_of = schema
+        .pointer("/$defs/action_cue/allOf")
+        .and_then(Value::as_array)
+        .expect("action cue allOf");
+    let kind_name = kind.as_str();
+    let rule = all_of
+        .iter()
+        .find(|rule| {
+            rule.pointer("/if/properties/kind/const")
+                .and_then(Value::as_str)
+                == Some(kind_name)
+        })
+        .unwrap_or_else(|| panic!("missing schema rule for action cue kind {kind_name}"));
+
+    rule.pointer("/then/properties/evidence/const")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("missing evidence const for action cue kind {kind_name}"))
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .unwrap_or_else(|| panic!("non-string evidence for {kind_name}: {value:?}"))
+                .to_string()
+        })
+        .collect()
 }
 
 fn validation_errors(schema: &Value, instance: &Value) -> Vec<String> {
@@ -108,6 +153,18 @@ fn sample_update(now: chrono::DateTime<Utc>) -> ThoughtUpdate {
     }
 }
 
+fn sample_session_delta() -> SessionDelta {
+    SessionDelta {
+        session_id: "sess-1".to_string(),
+        kind: SessionDeltaKind::Changed,
+        state: Some(SessionState::Busy),
+        tool: Some("codex".to_string()),
+        cwd: Some("/schema-sync/project".to_string()),
+        changed_fields: vec![SessionDeltaField::ReplayText, SessionDeltaField::Activity],
+        transcript_ambiguous: false,
+    }
+}
+
 fn commit_ready_cue() -> ActionCue {
     ActionCue {
         kind: ActionCueKind::CommitReady,
@@ -127,6 +184,97 @@ fn commit_ready_cue() -> ActionCue {
 fn schema_files_are_valid_json() {
     load_json(include_str!("../references/clawgs.v2.schema.json"));
     load_json(include_str!("../references/clawgs.emit.v2.schema.json"));
+}
+
+#[test]
+fn emit_v2_backend_schema_matches_runtime_aliases() {
+    let schema = load_json(include_str!("../references/clawgs.emit.v2.schema.json"));
+    let schema_backends = string_array_at(&schema, "/$defs/thought_config/properties/backend/enum");
+    let expected = [
+        "",
+        "openrouter",
+        "grok",
+        "grok_cli",
+        "grok-cli",
+        "claude",
+        "claude_cli",
+        "claude-cli",
+        "codex",
+        "codex_cli",
+        "codex-cli",
+    ];
+
+    assert_eq!(schema_backends, expected);
+    for backend in expected {
+        assert!(
+            backend.is_empty() || ModelBackend::from_env_value(backend).is_some(),
+            "schema backend {backend:?} must be accepted by runtime validation"
+        );
+    }
+}
+
+#[test]
+fn emit_v1_backend_schema_stays_historical() {
+    let schema = load_json(include_str!("../references/clawgs.emit.v1.schema.json"));
+    assert_eq!(
+        string_array_at(&schema, "/$defs/thought_config/properties/backend/enum"),
+        ["", "openrouter", "claude", "codex"]
+    );
+}
+
+#[test]
+fn emit_protocol_hello_example_matches_crate_version() {
+    let docs = include_str!("../references/emit-protocol-v2.md");
+    let expected = format!(
+        r#"{{"type":"hello","protocol":"clawgs.emit.v2","engine_version":"{}"}}"#,
+        env!("CARGO_PKG_VERSION")
+    );
+    assert!(
+        docs.contains(&expected),
+        "emit protocol docs must show the current hello engine_version: {expected}"
+    );
+}
+
+#[test]
+fn action_cue_schema_evidence_matches_runtime_rules() {
+    let extract_schema = load_json(include_str!("../references/clawgs.v2.schema.json"));
+    let emit_schema = load_json(include_str!("../references/clawgs.emit.v2.schema.json"));
+    let kinds = [
+        ActionCueKind::AwaitingUser,
+        ActionCueKind::CommitReady,
+        ActionCueKind::ValidationMissingAfterEdit,
+        ActionCueKind::DirtyCheckMissing,
+    ];
+
+    for kind in kinds {
+        let runtime: Vec<String> = ActionCue::expected_evidence(kind)
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect();
+        assert_eq!(
+            action_cue_schema_evidence(&extract_schema, kind),
+            runtime,
+            "extract schema evidence drifted for {}",
+            kind.as_str()
+        );
+        assert_eq!(
+            action_cue_schema_evidence(&emit_schema, kind),
+            runtime,
+            "emit schema evidence drifted for {}",
+            kind.as_str()
+        );
+    }
+}
+
+#[test]
+fn claude_hook_reference_is_valid_and_targets_notify_command() {
+    let snippet = load_json(include_str!("../references/claude-code-hooks.json"));
+    for event in ["Notification", "PostToolUse", "Stop"] {
+        assert_eq!(
+            snippet["hooks"][event][0]["hooks"][0]["command"], "clawgs claude-hook-notify",
+            "hook snippet command drifted for {event}"
+        );
+    }
 }
 
 #[test]
@@ -250,10 +398,27 @@ fn emit_sync_result_validates() {
             suppressed: 0,
             last_backend_error: Some("backend unavailable".to_string()),
         },
-    );
+    )
+    .with_session_deltas(vec![sample_session_delta()]);
     let instance = serde_json::to_value(message).expect("serialize sync result");
 
     validate(&schema, &instance);
+}
+
+#[test]
+fn emit_schema_rejects_unknown_session_delta_field() {
+    let schema = load_json(include_str!("../references/clawgs.emit.v2.schema.json"));
+    let mut instance = serde_json::to_value(
+        SyncResultMessage::new("req-1", "stream-1", Vec::new(), SyncMetrics::default())
+            .with_session_deltas(vec![sample_session_delta()]),
+    )
+    .expect("serialize sync result");
+    instance["session_deltas"][0]["changed_fields"] = serde_json::json!(["replay"]);
+
+    assert!(
+        !validation_errors(&schema, &instance).is_empty(),
+        "unknown delta changed field must not validate"
+    );
 }
 
 #[test]

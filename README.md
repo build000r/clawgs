@@ -41,6 +41,7 @@ Agent transcripts are useful, but they are verbose, tool-specific, and usually t
 | `extract` | Normalizes Claude/Codex JSONL into one compact machine-readable snapshot with parser-derived `action_cues` |
 | `emit --stdio` | Speaks a small NDJSON protocol for downstream status reporters, including live `action_cues` |
 | `tmux-emit` | Scans live tmux panes, infers context, and emits only changed thoughts |
+| `claude-hook-notify` | Lets Claude Code hooks wake a running `tmux-emit` daemon without blocking Claude |
 
 ## Quick Example
 
@@ -63,6 +64,9 @@ clawgs extract --tool auto --cwd "$PWD"
 
 # Run the live stdio daemon
 clawgs emit --stdio
+
+# Optional: let Claude Code hooks wake a tmux-emit daemon
+clawgs claude-hook-notify < hook-event.json
 ```
 
 Or build from source:
@@ -76,6 +80,32 @@ target/release/clawgs demo extract --tool codex --pretty
 ```
 
 Protocol details live in [references/emit-protocol-v2.md](https://github.com/build000r/clawgs/blob/main/references/emit-protocol-v2.md), with a machine-validatable JSON Schema at [references/clawgs.emit.v2.schema.json](https://github.com/build000r/clawgs/blob/main/references/clawgs.emit.v2.schema.json). The extract schema lives in [references/schema-v2.md](https://github.com/build000r/clawgs/blob/main/references/schema-v2.md), with JSON Schema at [references/clawgs.v2.schema.json](https://github.com/build000r/clawgs/blob/main/references/clawgs.v2.schema.json).
+
+### Transcript Discovery
+
+`clawgs extract --tool auto --cwd "$PWD"` resolves checked-in schemas from local
+tool logs only. Pass `--input` when you already know the transcript path or when
+the transcript lives outside the default Claude/Codex locations.
+
+Claude Code discovery looks under
+`$HOME/.claude/projects/<cwd-with-slashes-replaced-by-dashes>/*.jsonl`, keeps
+JSONL files whose first 64 parseable lines either contain an exact top-level
+`cwd` match or no `cwd` field at all, and returns the newest remaining file. The
+no-`cwd` fallback keeps older Claude logs discoverable; files with no parseable
+JSONL lines are ignored.
+
+Codex discovery scans numeric date folders under
+`$HOME/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`, reads only the first line of
+each candidate, requires a `session_meta.payload.cwd` exact match, and returns
+the newest matching rollout by reverse date/path order. Empty files, malformed
+first lines, non-`session_meta` first lines, non-numeric date folders, and
+non-`rollout-*.jsonl` files are ignored.
+
+When multiple live sessions point at the same cwd, the tmux emitter remembers
+claimed transcript paths and asks discovery for the next matching file instead
+of reusing the same transcript for another pane. If `HOME` is unset or no
+candidate matches, discovery returns the same "no transcript JSONL found" error
+and the direct `--input` path remains the escape hatch.
 
 ## Design Philosophy
 
@@ -108,6 +138,8 @@ The checked-in corpus in [examples/demo](https://github.com/build000r/clawgs/tre
 - You need a consistent JSON snapshot from Claude/Codex logs.
 - You want a replayable contract for demos, tests, or downstream tools.
 - You want tmux polling and thought emission without rewriting the parsing logic.
+- You need compact session boundary/change facts through `session_deltas`
+  without scraping raw transcripts or tmux pane text.
 
 **When `clawgs` is not the right tool:**
 - You need full transcript storage, search, or analytics.
@@ -231,6 +263,18 @@ target/release/clawgs tmux-emit --once
 target/release/clawgs tmux-emit --interval-ms 60000
 ```
 
+Opt-in live smoke proof:
+
+```bash
+bash scripts/smoke_tmux_live.sh
+```
+
+The smoke script skips clearly when `tmux` is unavailable. When `tmux` exists,
+it creates a private tmux server/session and notify socket, runs `tmux-emit
+--once` with thought generation disabled, verifies `hello` and `sync_result`
+NDJSON output with at least one seen session, and cleans up. It is intentionally
+not part of `cargo test`.
+
 ### `clawgs tmux-notify`
 
 Pokes the tmux daemon socket so a hook can trigger an immediate rescan.
@@ -238,6 +282,21 @@ Pokes the tmux daemon socket so a hook can trigger an immediate rescan.
 ```bash
 target/release/clawgs tmux-notify --event session-created
 ```
+
+### `clawgs claude-hook-notify`
+
+Reads Claude Code hook JSON from stdin, derives a compact event tag, and pokes
+the same socket used by `tmux-notify`. It exits successfully when the daemon is
+not running, so it is safe to install in Claude Code hooks without putting
+Claude's tool loop on the critical path.
+
+```bash
+target/release/clawgs claude-hook-notify
+target/release/clawgs claude-hook-notify --socket "$HOME/.tmux/clawgs-tmux.sock"
+```
+
+A copyable Claude Code hook settings snippet lives at
+[references/claude-code-hooks.json](https://github.com/build000r/clawgs/blob/main/references/claude-code-hooks.json).
 
 ### `clawgs defaults`
 
@@ -312,6 +371,7 @@ The demo commands do not require any of the variables above.
 │ Stable Contracts                                               │
 │ - `clawgs.v2` extract snapshot                                │
 │ - `clawgs.emit.v2` hello/sync/sync_result protocol            │
+│ - additive `session_deltas` boundary/change facts             │
 └───────────────────────────────────────────────────────────────┘
                              │
             ┌────────────────┴────────────────┐
@@ -328,6 +388,9 @@ The demo commands do not require any of the variables above.
 ### `no Claude or Codex transcript JSONL found`
 
 Auto-discovery only works if the expected session logs exist in your local tool directories.
+Discovery requires `HOME`, exact cwd matches where the transcript format carries
+cwd metadata, and a parseable candidate file. Use `--input` for stale, moved, or
+non-standard transcript locations.
 
 ```bash
 target/release/clawgs demo extract --tool codex --pretty
@@ -383,6 +446,8 @@ target/release/clawgs tmux-emit --once
 [RELEASE.md](RELEASE.md). The GitHub Actions release workflow verifies format,
 clippy, tests, package contents, and `cargo publish --dry-run` before publishing
 tagged `v*.*.*` releases with `CARGO_REGISTRY_TOKEN`.
+The opt-in live tmux smoke is local-machine proof and is documented in the
+manual release checklist rather than forced into CI.
 
 ## FAQ
 

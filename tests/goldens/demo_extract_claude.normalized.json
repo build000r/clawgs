@@ -1,0 +1,42 @@
+{
+  "demo": "extract",
+  "tool": "claude",
+  "input_path": "embedded:examples/demo/claude-sample.jsonl",
+  "input_jsonl": "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Summarize logs\"}}\n{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input_tokens\":88},\"content\":[{\"type\":\"tool_use\",\"name\":\"read_file\",\"input\":{\"file_path\":\"/tmp/demo.txt\"}},{\"type\":\"text\",\"text\":\"I read the file\"}]}}\n",
+  "output": {
+    "schema_version": "clawgs.v2",
+    "source": {
+      "tool": "claude",
+      "path": "embedded:examples/demo/claude-sample.jsonl",
+      "discovered": false,
+      "cwd": "/demo/claude-project"
+    },
+    "snapshot": {
+      "user_task": "Summarize logs",
+      "current_tool": {
+        "tool": "read_file",
+        "detail": "demo.txt",
+        "kind": "tool_use"
+      },
+      "token_count": 88,
+      "recent_actions": [
+        {
+          "tool": "read_file",
+          "detail": "demo.txt",
+          "kind": "tool_use"
+        },
+        {
+          "tool": "said",
+          "detail": "I read the file",
+          "kind": "text"
+        }
+      ]
+    },
+    "stats": {
+      "events_seen": 2,
+      "malformed_lines_skipped": 0,
+      "bytes_read": 279
+    },
+    "generated_at": "<generated_at>"
+  }
+}

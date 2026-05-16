@@ -1,7 +1,102 @@
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 
 use serde_json::Value;
+use tempfile::TempDir;
+
+fn sync_request(id: &str, sessions: Vec<Value>) -> Value {
+    serde_json::json!({
+        "type": "sync",
+        "id": id,
+        "now": "2026-02-26T21:00:00Z",
+        "config": {
+            "enabled": true,
+            "model": "",
+            "cadence_hot_ms": 15000,
+            "cadence_warm_ms": 45000,
+            "cadence_cold_ms": 120000,
+            "agent_prompt": null,
+            "terminal_prompt": null
+        },
+        "sessions": sessions
+    })
+}
+
+fn session_snapshot(replay_text: &str) -> Value {
+    serde_json::json!({
+        "session_id": "sess-1",
+        "state": "busy",
+        "exited": false,
+        "tool": "codex",
+        "cwd": "/tmp/project",
+        "replay_text": replay_text,
+        "thought": null,
+        "thought_state": "holding",
+        "thought_source": "carry_forward",
+        "objective_fingerprint": null,
+        "thought_updated_at": null,
+        "token_count": 1000,
+        "context_limit": 192000,
+        "last_activity_at": "2026-02-26T21:00:00Z",
+        "rest_state": "active",
+        "commit_candidate": false,
+        "action_cues": []
+    })
+}
+
+fn run_emit_stdio(lines: &[Value], envs: &[(&str, &str)], remove_envs: &[&str]) -> Vec<Value> {
+    let home = TempDir::new().expect("temp home");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_clawgs"));
+    command
+        .arg("emit")
+        .arg("--stdio")
+        .env("HOME", home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    for key in remove_envs {
+        command.env_remove(key);
+    }
+
+    let mut child = command.spawn().expect("failed to spawn clawgs emit");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin");
+        for line in lines {
+            writeln!(stdin, "{line}").expect("write sync request");
+        }
+    }
+
+    let output = child.wait_with_output().expect("wait for child");
+    assert!(
+        output.status.success(),
+        "process failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("stdout utf8")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("json line"))
+        .collect()
+}
+
+fn fake_grok_script(temp_dir: &TempDir) -> std::path::PathBuf {
+    let script_path = temp_dir.path().join("fake-grok");
+    std::fs::write(
+        &script_path,
+        "#!/usr/bin/env bash\nset -euo pipefail\nprintf 'fake grok thought\\n'\n",
+    )
+    .expect("write fake grok");
+    let mut permissions = std::fs::metadata(&script_path)
+        .expect("script metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script_path, permissions).expect("chmod fake grok");
+    script_path
+}
 
 #[test]
 fn emit_stdio_writes_hello_and_sync_result() {
@@ -57,6 +152,96 @@ fn emit_stdio_writes_hello_and_sync_result() {
     assert_eq!(result["type"], "sync_result");
     assert_eq!(result["id"], "req-1");
     assert!(result["stream_instance_id"].as_str().is_some());
+}
+
+#[test]
+fn emit_stdio_reports_missing_openrouter_key_as_sync_result() {
+    let lines = run_emit_stdio(
+        &[
+            sync_request("req-bootstrap", vec![session_snapshot("$ ")]),
+            sync_request(
+                "req-openrouter",
+                vec![session_snapshot(
+                    "running cargo test --all\nreviewing OpenRouter credential fallback behavior after a meaningful terminal update that should trigger the model path\n",
+                )],
+            ),
+        ],
+        &[("CLAWGS_MODEL_BACKEND", "openrouter")],
+        &["OPENROUTER_API_KEY"],
+    );
+
+    assert_eq!(lines[0]["type"], "hello");
+    assert_eq!(lines[1]["type"], "sync_result");
+    assert_eq!(lines[2]["type"], "sync_result");
+    assert_eq!(lines[2]["id"], "req-openrouter");
+    assert!(lines[2]["metrics"]["last_backend_error"]
+        .as_str()
+        .expect("backend error")
+        .contains("OPENROUTER_API_KEY not set"));
+}
+
+#[test]
+fn emit_stdio_legacy_backend_aliases_map_to_grok_missing_binary_errors() {
+    for alias in ["claude", "codex"] {
+        let lines = run_emit_stdio(
+            &[
+                sync_request("req-bootstrap", vec![session_snapshot("$ ")]),
+                sync_request(
+                    &format!("req-{alias}"),
+                    vec![session_snapshot(
+                        "running cargo test --all\nreviewing legacy backend alias fallback behavior after a meaningful terminal update that should trigger the model path\n",
+                    )],
+                ),
+            ],
+            &[
+                ("CLAWGS_MODEL_BACKEND", alias),
+                ("CLAWGS_GROK_BIN", "/definitely/missing-grok"),
+            ],
+            &["OPENROUTER_API_KEY"],
+        );
+
+        assert_eq!(lines[0]["type"], "hello");
+        assert_eq!(lines[1]["type"], "sync_result");
+        assert_eq!(lines[2]["type"], "sync_result");
+        let error = lines[2]["metrics"]["last_backend_error"]
+            .as_str()
+            .expect("backend error");
+        assert!(
+            error.contains("grok") && error.contains("No such file or directory"),
+            "unexpected backend error for alias {alias}: {error}"
+        );
+    }
+}
+
+#[test]
+fn emit_stdio_uses_fake_grok_binary_for_live_thought() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let fake_grok = fake_grok_script(&temp_dir);
+    let fake_grok = fake_grok.to_str().expect("fake grok path");
+    let lines = run_emit_stdio(
+        &[
+            sync_request("req-bootstrap", vec![session_snapshot("$ ")]),
+            sync_request(
+                "req-grok",
+                vec![session_snapshot(
+                    "running cargo test --all\nreviewing backend selection and no credential behavior after a meaningful terminal update that should trigger the model path and call the fake Grok binary\n",
+                )],
+            ),
+        ],
+        &[
+            ("CLAWGS_MODEL_BACKEND", "grok"),
+            ("CLAWGS_GROK_BIN", fake_grok),
+        ],
+        &["OPENROUTER_API_KEY"],
+    );
+
+    assert_eq!(lines[0]["type"], "hello");
+    assert_eq!(lines[1]["type"], "sync_result");
+    assert_eq!(lines[2]["type"], "sync_result");
+    assert_eq!(lines[2]["id"], "req-grok");
+    assert_eq!(lines[2]["updates"][0]["thought"], "fake grok thought");
+    assert_eq!(lines[2]["metrics"]["llm_calls"], 1);
+    assert!(lines[2]["metrics"]["last_backend_error"].is_null());
 }
 
 #[test]

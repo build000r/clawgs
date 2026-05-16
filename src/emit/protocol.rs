@@ -20,6 +20,10 @@ pub const CADENCE_COLD_MAX_MS: u64 = 1_800_000;
 pub const MODEL_MAX_CHARS: usize = 200;
 pub const PROMPT_MAX_CHARS: usize = 4_000;
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
@@ -396,6 +400,43 @@ pub struct SyncUpdate {
 
 pub type ThoughtUpdate = SyncUpdate;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionDeltaKind {
+    Started,
+    Changed,
+    Unchanged,
+    Exited,
+    Removed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionDeltaField {
+    State,
+    Exited,
+    Tool,
+    Cwd,
+    ReplayText,
+    Activity,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionDelta {
+    pub session_id: String,
+    pub kind: SessionDeltaKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<SessionState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_fields: Vec<SessionDeltaField>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub transcript_ambiguous: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TimingInfo {
     pub run_started_at: DateTime<Utc>,
@@ -452,6 +493,8 @@ pub struct SyncResultMessage {
     pub msg_type: &'static str,
     pub id: String,
     pub stream_instance_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub session_deltas: Vec<SessionDelta>,
     pub updates: Vec<ThoughtUpdate>,
     pub metrics: SyncMetrics,
 }
@@ -467,9 +510,15 @@ impl SyncResultMessage {
             msg_type: SYNC_RESULT_MESSAGE_TYPE,
             id: id.into(),
             stream_instance_id: stream_instance_id.into(),
+            session_deltas: Vec::new(),
             updates,
             metrics,
         }
+    }
+
+    pub fn with_session_deltas(mut self, session_deltas: Vec<SessionDelta>) -> Self {
+        self.session_deltas = session_deltas;
+        self
     }
 }
 
@@ -944,6 +993,32 @@ mod tests {
         assert_eq!(json["timing"]["run_elapsed_ms"], 0);
         assert_eq!(json["cues"]["cadence_tier"], "hot");
         assert_eq!(json["cues"]["context_source"], "transcript");
+    }
+
+    #[test]
+    fn sync_result_serializes_session_deltas_when_present() {
+        let result =
+            SyncResultMessage::new("req-1", "stream-1", Vec::new(), SyncMetrics::default())
+                .with_session_deltas(vec![SessionDelta {
+                    session_id: "sess-1".to_string(),
+                    kind: SessionDeltaKind::Changed,
+                    state: Some(SessionState::Busy),
+                    tool: Some("codex".to_string()),
+                    cwd: Some("/tmp/project".to_string()),
+                    changed_fields: vec![
+                        SessionDeltaField::ReplayText,
+                        SessionDeltaField::Activity,
+                    ],
+                    transcript_ambiguous: true,
+                }]);
+
+        let json = serde_json::to_value(&result).expect("result should serialize");
+        assert_eq!(json["session_deltas"][0]["kind"], "changed");
+        assert_eq!(
+            json["session_deltas"][0]["changed_fields"][0],
+            "replay_text"
+        );
+        assert_eq!(json["session_deltas"][0]["transcript_ambiguous"], true);
     }
 
     #[test]

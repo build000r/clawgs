@@ -1,0 +1,44 @@
+{
+  "demo": "extract",
+  "tool": "codex",
+  "input_path": "embedded:examples/demo/codex-sample.jsonl",
+  "input_jsonl": "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/project\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Build a parser\"}}\n{\"type\":\"response\",\"payload\":{\"usage\":{\"input_tokens\":1212}}}\n{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"command\\\":\\\"ls -la\\\"}\"}}\n",
+  "output": {
+    "schema_version": "clawgs.v2",
+    "source": {
+      "tool": "codex",
+      "path": "embedded:examples/demo/codex-sample.jsonl",
+      "discovered": false,
+      "cwd": "/demo/codex-project"
+    },
+    "snapshot": {
+      "user_task": "Build a parser",
+      "current_tool": {
+        "tool": "exec_command",
+        "detail": "ls -la",
+        "kind": "function_call"
+      },
+      "token_count": 1212,
+      "recent_actions": [
+        {
+          "tool": "exec_command",
+          "detail": "ls -la",
+          "kind": "function_call"
+        }
+      ],
+      "commit_signal": {
+        "candidate": false,
+        "edited": false,
+        "validated": false,
+        "dirty_checked": false,
+        "commit_seen": false
+      }
+    },
+    "stats": {
+      "events_seen": 4,
+      "malformed_lines_skipped": 0,
+      "bytes_read": 322
+    },
+    "generated_at": "<generated_at>"
+  }
+}

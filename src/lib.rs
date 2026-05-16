@@ -635,20 +635,26 @@ fn codex_rollout_files(day: &Path) -> Vec<PathBuf> {
 }
 
 fn reader_matches_or_lacks_cwd<R: BufRead>(reader: R, cwd_str: &str) -> bool {
-    let matches: Vec<bool> = reader
+    let mut saw_valid_json = false;
+    let mut saw_cwd = false;
+
+    for value in reader
         .lines()
         .take(64)
         .filter_map(|line| line.ok())
         .filter_map(|line| parsed_line_value(&line))
-        .filter_map(|value| {
-            value
-                .get("cwd")
-                .and_then(Value::as_str)
-                .map(|entry| entry == cwd_str)
-        })
-        .collect();
+    {
+        saw_valid_json = true;
+        let Some(entry_cwd) = value.get("cwd").and_then(Value::as_str) else {
+            continue;
+        };
+        saw_cwd = true;
+        if entry_cwd == cwd_str {
+            return true;
+        }
+    }
 
-    matches.is_empty() || matches.into_iter().any(|matched| matched)
+    saw_valid_json && !saw_cwd
 }
 
 #[cfg(test)]
@@ -767,6 +773,53 @@ mod tests {
         )
         .expect("write");
         assert!(codex_file_matches_cwd(file.path(), dir.path()));
+    }
+
+    #[test]
+    fn claude_file_matches_cwd_returns_false_for_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("does-not-exist.jsonl");
+        assert!(!claude_file_matches_cwd(&missing, dir.path()));
+    }
+
+    #[test]
+    fn claude_file_matches_cwd_returns_false_when_no_parseable_jsonl_lines() {
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(file.path(), b"not-json\nalso-not-json\n").expect("write");
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(!claude_file_matches_cwd(file.path(), dir.path()));
+    }
+
+    #[test]
+    fn claude_file_matches_cwd_returns_true_when_valid_json_lacks_cwd() {
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            b"{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\"}}\n",
+        )
+        .expect("write");
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(claude_file_matches_cwd(file.path(), dir.path()));
+    }
+
+    #[test]
+    fn discover_auto_errors_when_home_is_missing() {
+        let _lock = crate::test_support::home_env_lock().lock().unwrap();
+        let original_home = std::env::var_os("HOME");
+        std::env::remove_var("HOME");
+        let cwd = PathBuf::from("/tmp/no-home-project");
+
+        let err = discover_auto(&cwd).expect_err("missing HOME should not discover transcripts");
+        let message = err.to_string();
+        assert!(
+            message.contains("no Claude or Codex transcript JSONL found"),
+            "got: {message}"
+        );
+        assert!(message.contains("--input <path/to/session.jsonl>"));
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        }
     }
 
     #[test]
@@ -1002,6 +1055,86 @@ mod tests {
         assert_eq!(resolved.tool, AgentTool::Codex);
         assert_eq!(resolved.path, rollout);
         assert!(resolved.discovered);
+    }
+
+    #[test]
+    fn codex_discovery_skips_non_numeric_dirs_non_rollouts_and_malformed_headers() {
+        let _lock = crate::test_support::home_env_lock().lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = PathBuf::from("/tmp/codex-filter-project");
+        std::env::set_var("HOME", tmp.path());
+
+        let sessions = tmp.path().join(".codex").join("sessions");
+        let ignored_non_numeric = sessions.join("latest").join("05").join("16");
+        fs::create_dir_all(&ignored_non_numeric).expect("mkdir");
+        fs::write(
+            ignored_non_numeric.join("rollout-newer.jsonl"),
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"cwd\":\"{}\"}}}}\n",
+                cwd.display()
+            ),
+        )
+        .expect("write non-numeric candidate");
+
+        let ignored_non_rollout = sessions.join("2027").join("05").join("16");
+        fs::create_dir_all(&ignored_non_rollout).expect("mkdir");
+        fs::write(
+            ignored_non_rollout.join("session-newer.jsonl"),
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"cwd\":\"{}\"}}}}\n",
+                cwd.display()
+            ),
+        )
+        .expect("write non-rollout candidate");
+
+        let malformed_day = sessions.join("2026").join("03").join("17");
+        fs::create_dir_all(&malformed_day).expect("mkdir");
+        fs::write(malformed_day.join("rollout-z.jsonl"), b"not-json\n")
+            .expect("write malformed candidate");
+
+        let valid_day = sessions.join("2026").join("03").join("16");
+        fs::create_dir_all(&valid_day).expect("mkdir");
+        let valid = valid_day.join("rollout-a.jsonl");
+        fs::write(
+            &valid,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"cwd\":\"{}\"}}}}\n",
+                cwd.display()
+            ),
+        )
+        .expect("write valid candidate");
+
+        assert_eq!(discover_codex_path(&cwd), Some(valid));
+    }
+
+    #[test]
+    fn codex_excluding_newest_returns_next_matching_rollout() {
+        let _lock = crate::test_support::home_env_lock().lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = PathBuf::from("/tmp/codex-shared-cwd");
+        std::env::set_var("HOME", tmp.path());
+
+        let codex_day = tmp
+            .path()
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("03")
+            .join("16");
+        fs::create_dir_all(&codex_day).expect("mkdir");
+        let older = codex_day.join("rollout-a.jsonl");
+        let newer = codex_day.join("rollout-z.jsonl");
+        let line = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"cwd\":\"{}\"}}}}\n",
+            cwd.display()
+        );
+        fs::write(&older, &line).expect("write older");
+        fs::write(&newer, &line).expect("write newer");
+
+        let mut excluded = HashSet::new();
+        excluded.insert(newer);
+
+        assert_eq!(discover_codex_path_excluding(&cwd, &excluded), Some(older));
     }
 
     #[test]

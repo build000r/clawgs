@@ -49,6 +49,7 @@ Poll every live tmux pane it can find, build session snapshots automatically, an
 ```bash
 target/release/clawgs tmux-emit --once
 target/release/clawgs tmux-emit
+bash scripts/smoke_tmux_live.sh
 ```
 
 Recommended shape: keep `tmux-emit` running as a daemon, let tmux hooks send immediate notify events, and keep the built-in interval as a slower reconciliation scan.
@@ -79,6 +80,24 @@ Output shape:
 - `updates[]`: only panes that produced a new thought on that poll
 
 `tmux-emit` uses pane metadata + captured pane text as terminal context. If the pane command looks like Claude or Codex, it also tries transcript discovery by `cwd`.
+The live smoke script is opt-in and safe to run locally: it skips without
+`tmux`, otherwise uses an isolated tmux server/session/socket and disables
+thought generation while verifying `hello` and `sync_result` output.
+
+## Claude Code Hooks
+
+Install `claude-hook-notify` in Claude Code hooks when you want Claude lifecycle
+events to wake a running `tmux-emit` daemon. The command reads hook JSON on
+stdin, sends a compact event tag to the tmux notify socket, and exits
+successfully when the daemon is absent so it does not block Claude.
+
+```bash
+target/release/clawgs claude-hook-notify
+target/release/clawgs claude-hook-notify --socket "$HOME/.tmux/clawgs-tmux.sock"
+```
+
+Use [references/claude-code-hooks.json](references/claude-code-hooks.json) as a
+copyable settings snippet.
 
 ## Useful Flags
 
@@ -88,14 +107,23 @@ Output shape:
 - `--include-raw`: include raw parsed event excerpts for debugging
 - `--max-actions`, `--max-task-chars`, `--max-detail-chars`: output size controls
 
+Discovery is cwd-exact and local: Claude scans the cwd slug under
+`$HOME/.claude/projects` and accepts exact `cwd` matches or legacy files with no
+cwd evidence; Codex scans numeric `$HOME/.codex/sessions/YYYY/MM/DD` folders and
+requires first-line `session_meta.payload.cwd` to match exactly. Use `--input`
+when `HOME` is unset, logs moved, or the desired transcript is stale.
+
 ## Output Contract
 
 Schema version is `clawgs.v2`. Full field definitions and sample output are in [references/schema-v2.md](references/schema-v2.md).
 
 ## Release Metadata
 
-Current crate release target: `0.2.0`.
+Current crate release target: `0.3.0`.
 
-- `0.2.0` is the canonical `clawgs.v2` / `clawgs.emit.v2` schema and protocol release.
+- `0.2.0` is the canonical published `clawgs.v2` / `clawgs.emit.v2` schema and protocol release.
+- `0.3.0` is the current unreleased target for the Grok live backend, Claude
+  Code hook wake-up bridge, `session_deltas`, transcript-discovery hardening,
+  and opt-in live tmux smoke.
 - Release history is tracked in [CHANGELOG.md](CHANGELOG.md).
 - Tag and crates.io publish steps are tracked in [RELEASE.md](RELEASE.md).

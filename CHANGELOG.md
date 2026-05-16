@@ -10,8 +10,64 @@ from plain git tags.
 
 | Version | Date | Status | Evidence |
 | --- | --- | --- | --- |
+| `0.3.0` | Unreleased | In progress on `main`; not tagged or published | [`v0.2.0...HEAD`](https://github.com/build000r/clawgs/compare/v0.2.0...HEAD) |
 | `0.2.0` | 2026-05-06 | Tagged and published as a GitHub Release from `7856897` | [`v0.2.0`](https://github.com/build000r/clawgs/releases/tag/v0.2.0), [`7856897`](https://github.com/build000r/clawgs/commit/7856897) |
 | `0.1.0` | 2026-04-06 | Git tag only; no GitHub Release object found | [`v0.1.0`](https://github.com/build000r/clawgs/releases/tag/v0.1.0) |
+
+## [0.3.0] - Unreleased
+
+`0.3.0` is the current hook, backend, and reconciliation release target. It
+keeps the public `clawgs.v2` extract schema compatible and extends
+`clawgs.emit.v2` additively while making live emit backend behavior, session
+delta facts, and Claude Code hook wake-ups explicit.
+
+### Live Backend
+
+- Replaced the local Claude/Codex CLI thought backend implementations with a
+  Grok headless backend.
+- Kept `openrouter` as a supported backend.
+- Kept legacy `claude` and `codex` backend config values as aliases that route
+  to Grok, so existing downstream configs fail less abruptly.
+- Updated `clawgs.emit.v2` schema/backend validation to accept `grok` while
+  leaving the historical `clawgs.emit.v1` schema unchanged.
+- Added no-credentials stdio tests proving missing backend credentials are
+  reported as `sync_result.metrics.last_backend_error` instead of daemon
+  process failures.
+
+### Emit Protocol And Discovery
+
+- Added optional `sync_result.session_deltas` to `clawgs.emit.v2` with
+  started/changed/unchanged/exited/removed boundary facts, enumerated
+  changed fields, and `transcript_ambiguous` flags for duplicate `(tool, cwd)`
+  sessions.
+- Hardened transcript discovery so malformed-only Claude candidates are
+  ignored while valid legacy Claude logs without `cwd` metadata remain
+  discoverable.
+- Documented exact Claude/Codex discovery behavior, missing `HOME` handling,
+  duplicate-session exclusion fallback, and scan bounds.
+- Added checked-in golden contract fixtures for demo emit/extract and fixture
+  extraction output.
+
+### Hooks And Local Integration
+
+- Added `clawgs claude-hook-notify`, a non-blocking Claude Code hook bridge
+  that reads hook JSON from stdin and wakes the existing `tmux-emit` notify
+  socket.
+- Added `references/claude-code-hooks.json` as a copyable Claude Code hook
+  settings snippet.
+- Documented `target/release/clawgs` as the stable source-checkout binary path
+  for downstream tools such as Swimmers.
+- Added `scripts/smoke_tmux_live.sh`, an opt-in live tmux proof that skips when
+  tmux is unavailable and otherwise runs `tmux-emit --once` against an isolated
+  tmux server/session/socket.
+
+### Release Hygiene
+
+- Expanded package exclusions and release workflow package checks for local
+  operator state such as `.beads/`, `.mcp.json`, `.claude/`, `.codex/`, backup
+  files, and `.env` files.
+- Added `scripts/check.sh` coverage for the `defaults` command in addition to
+  help and fixture extraction.
 
 ## [0.2.0] - 2026-05-06
 
@@ -109,4 +165,5 @@ which addressed pre-publish review fixups in `Cargo.toml` and `README.md`.
 No GitHub Release object was found for this version.
 
 [0.2.0]: https://github.com/build000r/clawgs/compare/v0.1.0...v0.2.0
+[0.3.0]: https://github.com/build000r/clawgs/compare/v0.2.0...HEAD
 [0.1.0]: https://github.com/build000r/clawgs/releases/tag/v0.1.0

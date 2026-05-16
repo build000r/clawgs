@@ -1,6 +1,6 @@
 mod demo;
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixDatagram;
 use std::path::PathBuf;
@@ -41,6 +41,8 @@ enum Commands {
     TmuxEmit(TmuxEmitArgs),
     /// Send a one-shot rescan signal to a running `tmux-emit` daemon over its UDP-style unix socket.
     TmuxNotify(TmuxNotifyArgs),
+    /// Read Claude Code hook JSON from stdin and wake a running `tmux-emit` daemon without blocking Claude.
+    ClaudeHookNotify(ClaudeHookNotifyArgs),
     /// Print resolved daemon defaults as JSON.
     Defaults,
 }
@@ -173,6 +175,21 @@ struct TmuxNotifyArgs {
     event: String,
 }
 
+#[derive(Debug, Args)]
+struct ClaudeHookNotifyArgs {
+    /// Path to the running daemon's notify socket. Defaults to the same path `tmux-emit` picks.
+    #[arg(long)]
+    socket: Option<PathBuf>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ClaudeHookInput {
+    hook_event_name: Option<String>,
+    session_id: Option<String>,
+    transcript_path: Option<String>,
+    cwd: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ToolArg {
     Auto,
@@ -201,6 +218,7 @@ fn run() -> Result<()> {
         Commands::Emit(args) => run_emit(args),
         Commands::TmuxEmit(args) => run_tmux_emit(args),
         Commands::TmuxNotify(args) => run_tmux_notify(args),
+        Commands::ClaudeHookNotify(args) => run_claude_hook_notify(args),
         Commands::Defaults => run_defaults(),
     }
 }
@@ -568,11 +586,69 @@ fn write_json_line<W: Write, T: Serialize>(writer: &mut W, value: &T) -> Result<
 
 fn run_tmux_notify(args: TmuxNotifyArgs) -> Result<()> {
     let socket_path = args.socket.unwrap_or_else(default_tmux_socket_path);
-    let sender = UnixDatagram::unbound().context("failed to create tmux notify socket")?;
-
-    // Hooks should be safe to install even before the daemon is running.
-    let _ = sender.send_to(args.event.as_bytes(), &socket_path);
+    send_notify_datagram(&socket_path, args.event.as_bytes())?;
     Ok(())
+}
+
+fn run_claude_hook_notify(args: ClaudeHookNotifyArgs) -> Result<()> {
+    let socket_path = args.socket.unwrap_or_else(default_tmux_socket_path);
+    let mut stdin = io::stdin().lock();
+    let mut raw = String::new();
+    let _ = stdin.read_to_string(&mut raw);
+    let event = claude_hook_event_tag(&raw);
+    send_notify_datagram(&socket_path, event.as_bytes())?;
+    Ok(())
+}
+
+fn send_notify_datagram(socket_path: &PathBuf, payload: &[u8]) -> Result<()> {
+    let sender = UnixDatagram::unbound().context("failed to create tmux notify socket")?;
+    // Hooks should be safe to install even before the daemon is running.
+    let _ = sender.send_to(payload, socket_path);
+    Ok(())
+}
+
+fn claude_hook_event_tag(raw: &str) -> String {
+    let input = serde_json::from_str::<ClaudeHookInput>(raw).unwrap_or_default();
+    let event = compact_hook_part(input.hook_event_name.as_deref(), "unknown");
+    let session = compact_hook_part(input.session_id.as_deref(), "");
+    let cwd = compact_hook_part(input.cwd.as_deref().and_then(last_path_segment), "");
+    let transcript = compact_hook_part(
+        input.transcript_path.as_deref().and_then(last_path_segment),
+        "",
+    );
+
+    let mut tag = format!("claude-code:{event}");
+    append_hook_part(&mut tag, "session", &session);
+    append_hook_part(&mut tag, "cwd", &cwd);
+    append_hook_part(&mut tag, "transcript", &transcript);
+    tag
+}
+
+fn append_hook_part(tag: &mut String, key: &str, value: &str) {
+    if !value.is_empty() {
+        tag.push(' ');
+        tag.push_str(key);
+        tag.push('=');
+        tag.push_str(value);
+    }
+}
+
+fn last_path_segment(path: &str) -> Option<&str> {
+    path.rsplit('/').find(|segment| !segment.is_empty())
+}
+
+fn compact_hook_part(value: Option<&str>, fallback: &str) -> String {
+    let raw = value.map(str::trim).filter(|value| !value.is_empty());
+    let compact = raw.unwrap_or(fallback).chars().take(64).map(safe_tag_char);
+    compact.collect()
+}
+
+fn safe_tag_char(ch: char) -> char {
+    if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':') {
+        ch
+    } else {
+        '_'
+    }
 }
 
 fn emit_tmux_scan<W: Write>(
@@ -886,6 +962,26 @@ mod tests {
 
         let error = validate_tmux_emit_args(&args).expect_err("huge interval should fail");
         assert!(error.to_string().contains("--interval-ms must be at most"));
+    }
+
+    #[test]
+    fn claude_hook_event_tag_compacts_common_fields() {
+        let raw = r#"{
+            "hook_event_name": "PostToolUse",
+            "session_id": "abc 123",
+            "cwd": "/tmp/my project",
+            "transcript_path": "/Users/me/.claude/projects/demo/session.jsonl"
+        }"#;
+
+        assert_eq!(
+            claude_hook_event_tag(raw),
+            "claude-code:PostToolUse session=abc_123 cwd=my_project transcript=session.jsonl"
+        );
+    }
+
+    #[test]
+    fn claude_hook_event_tag_tolerates_invalid_input() {
+        assert_eq!(claude_hook_event_tag("not-json"), "claude-code:unknown");
     }
 
     #[test]

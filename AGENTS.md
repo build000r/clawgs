@@ -2,7 +2,7 @@
 
 ## Project Shape
 - `clawgs` is a Rust 2021 CLI/library crate (`rust-version = 1.85`) for normalizing Claude Code and Codex JSONL transcripts into `clawgs.v2` snapshots and emitting live `clawgs.emit.v2` NDJSON status updates.
-- CLI entry point: `src/main.rs`, with subcommands `demo`, `extract`, `emit --stdio`, `tmux-emit`, `tmux-notify`, and `defaults`.
+- CLI entry point: `src/main.rs`, with subcommands `demo`, `extract`, `emit --stdio`, `tmux-emit`, `tmux-notify`, `claude-hook-notify`, and `defaults`.
 - Library entry point: `src/lib.rs`, exporting transcript discovery, extraction, parsers, emit protocol/engine, and tmux scanning.
 - Public contracts are documented in `references/schema-v2.md` and `references/emit-protocol-v2.md`; keep schema/protocol changes deliberate and tested.
 
@@ -19,6 +19,9 @@
 - Parse fixture: `cargo run -- extract --tool codex --input tests/fixtures/codex-sample.jsonl --pretty`.
 - Stdio daemon: `cargo run -- emit --stdio`.
 - Tmux one-shot scan: `cargo run -- tmux-emit --once`.
+- Opt-in live tmux smoke: `bash scripts/smoke_tmux_live.sh` (skips clearly when
+  `tmux` is unavailable; not part of normal `cargo test`).
+- Claude Code hook wake-up: `cargo run -- claude-hook-notify < hook-event.json`.
 - Release process: `RELEASE.md` documents the manual release contract, and `.github/workflows/release.yml` verifies tag builds before publishing to crates.io. Verify `CARGO_REGISTRY_TOKEN`, the crate version, and tag name before `cargo publish`.
 
 ## Layout
@@ -27,8 +30,9 @@
 - `src/tmux.rs`: tmux pane listing/capture and conversion into emit protocol `SessionSnapshot`s.
 - `src/demo.rs`: embedded demo corpus from `examples/demo/`.
 - `tests/`: integration tests and JSONL fixtures; `tests/artifacts/perf/` holds performance artifacts.
-- `scripts/`: install/check scripts plus performance scenario runners.
+- `scripts/`: install/check scripts, opt-in live tmux smoke, plus performance scenario runners.
 - `references/tmux-clawgs.conf`: tmux hook snippet; it writes runtime logs under `$HOME/.tmux/`.
+- `references/claude-code-hooks.json`: copyable Claude Code hook settings snippet for waking `tmux-emit`.
 - Downstream source checkouts such as Swimmers discover the stable local binary
   at `target/release/clawgs`; run `bash scripts/install.sh` when that path is
   missing rather than relying on a debug-only `cargo build`.
@@ -42,7 +46,7 @@
 - Keep `cargo test`, `cargo fmt -- --check`, and `cargo clippy --all-targets -- -D warnings` green; all three passed against the current tree during AGENTS creation.
 - Add or update tests when changing parser behavior, emit protocol serialization, model backend selection, tmux scanning, or CLI validation.
 - Tests that mutate process env should use the existing mutex patterns (`home_env_lock` / `ENV_LOCK`) to avoid cross-test races.
-- `tmux_emit` integration tests use a fake tmux script; live `tmux-emit --once` can depend on local tmux availability.
+- `tmux_emit` integration tests use a fake tmux script; `bash scripts/smoke_tmux_live.sh` is the opt-in live tmux proof and skips when local tmux is unavailable.
 - Performance scripts under `scripts/perf/` are separate from the normal test suite and may require release-perf builds or platform tools.
 
 ## Coding Notes

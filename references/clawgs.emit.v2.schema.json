@@ -73,6 +73,12 @@
         "stream_instance_id": {
           "type": "string"
         },
+        "session_deltas": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/session_delta"
+          }
+        },
         "updates": {
           "type": "array",
           "items": {
@@ -123,7 +129,19 @@
         },
         "backend": {
           "type": "string",
-          "enum": ["", "openrouter", "grok", "claude", "codex"]
+          "enum": [
+            "",
+            "openrouter",
+            "grok",
+            "grok_cli",
+            "grok-cli",
+            "claude",
+            "claude_cli",
+            "claude-cli",
+            "codex",
+            "codex_cli",
+            "codex-cli"
+          ]
         },
         "cadence_hot_ms": {
           "type": "integer",
@@ -229,6 +247,45 @@
           "items": {
             "$ref": "#/$defs/action_cue"
           }
+        }
+      }
+    },
+    "session_delta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "kind"],
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/session_delta_kind"
+        },
+        "state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/session_state"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool": {
+          "type": ["string", "null"]
+        },
+        "cwd": {
+          "type": ["string", "null"]
+        },
+        "changed_fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/session_delta_field"
+          },
+          "uniqueItems": true
+        },
+        "transcript_ambiguous": {
+          "type": "boolean"
         }
       }
     },
@@ -478,6 +535,12 @@
           "type": ["string", "null"]
         }
       }
+    },
+    "session_delta_kind": {
+      "enum": ["started", "changed", "unchanged", "exited", "removed"]
+    },
+    "session_delta_field": {
+      "enum": ["state", "exited", "tool", "cwd", "replay_text", "activity"]
     },
     "session_state": {
       "enum": ["idle", "busy", "error", "attention", "exited"]

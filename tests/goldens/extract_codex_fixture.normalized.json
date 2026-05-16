@@ -1,0 +1,38 @@
+{
+  "schema_version": "clawgs.v2",
+  "source": {
+    "tool": "codex",
+    "path": "tests/fixtures/codex-sample.jsonl",
+    "discovered": false,
+    "cwd": "/schema-sync/project"
+  },
+  "snapshot": {
+    "user_task": "Build a parser",
+    "current_tool": {
+      "tool": "exec_command",
+      "detail": "ls -la",
+      "kind": "function_call"
+    },
+    "token_count": 1212,
+    "recent_actions": [
+      {
+        "tool": "exec_command",
+        "detail": "ls -la",
+        "kind": "function_call"
+      }
+    ],
+    "commit_signal": {
+      "candidate": false,
+      "edited": false,
+      "validated": false,
+      "dirty_checked": false,
+      "commit_seen": false
+    }
+  },
+  "stats": {
+    "events_seen": 4,
+    "malformed_lines_skipped": 0,
+    "bytes_read": 322
+  },
+  "generated_at": "<generated_at>"
+}

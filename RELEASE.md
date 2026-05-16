@@ -7,9 +7,11 @@ publishing path when a `v*.*.*` tag is pushed.
 ## Current Release Target
 
 - Crate: `clawgs`
-- Version: `0.2.0`
-- Canonical release claim: `0.2.0` is the v2 schema/protocol release for
-  `clawgs.v2` and `clawgs.emit.v2`.
+- Version: `0.3.0`
+- Canonical release claim: `0.3.0` is the Grok backend, Claude Code hook
+  wake-up, live tmux smoke, transcript-discovery hardening, and additive
+  `clawgs.emit.v2` `session_deltas` release. The `clawgs.v2` extract contract
+  remains compatible.
 - Published channel: crates.io only.
 - Required secret for automated publish: `CARGO_REGISTRY_TOKEN`.
 
@@ -23,6 +25,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test --locked
 cargo build --release --locked
 bash scripts/check.sh
+bash scripts/smoke_tmux_live.sh
 cargo package --locked --list
 cargo publish --locked --dry-run
 ```
@@ -44,14 +47,14 @@ rm -rf "$tmpdir"
 4. Create an annotated tag:
 
 ```bash
-git tag -a v0.2.0 -m "clawgs v0.2.0 - schema v2 protocol release"
+git tag -a v0.3.0 -m "clawgs v0.3.0 - hook and backend release"
 ```
 
 5. Push the commit and tag:
 
 ```bash
 git push origin main
-git push origin v0.2.0
+git push origin v0.3.0
 ```
 
 6. The release workflow verifies formatting, linting, tests, package contents,
@@ -68,7 +71,7 @@ cargo publish --locked
 After publish completes:
 
 ```bash
-cargo install clawgs --version 0.2.0 --locked
+cargo install clawgs --version 0.3.0 --locked
 clawgs demo extract --tool codex --pretty
 clawgs demo emit --pretty
 ```

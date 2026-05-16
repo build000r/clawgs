@@ -8,7 +8,7 @@ The machine-validatable JSON Schema lives at `references/clawgs.emit.v2.schema.j
 On boot, the daemon writes:
 
 ```json
-{"type":"hello","protocol":"clawgs.emit.v2","engine_version":"0.2.0"}
+{"type":"hello","protocol":"clawgs.emit.v2","engine_version":"0.3.0"}
 ```
 
 ## Request
@@ -39,6 +39,11 @@ strings are normalized to no override. The JSON Schema covers scalar cadence
 ranges, while the daemon also validates ordering at runtime:
 `cadence_hot_ms <= cadence_warm_ms <= cadence_cold_ms`.
 
+`config.backend` accepts `openrouter` and `grok`. Legacy `claude` and `codex`
+values, including their `_cli` and `-cli` spellings, are accepted as aliases
+for `grok` so older local configs keep working while the daemon reports the
+canonical backend as `grok`.
+
 ## Success Response
 
 ```json
@@ -46,6 +51,17 @@ ranges, while the daemon also validates ordering at runtime:
   "type": "sync_result",
   "id": "req-123",
   "stream_instance_id": "stream-1",
+  "session_deltas": [
+    {
+      "session_id": "sess-1",
+      "kind": "changed",
+      "state": "busy",
+      "tool": "codex",
+      "cwd": "/repo/app",
+      "changed_fields": ["replay_text", "activity"],
+      "transcript_ambiguous": false
+    }
+  ],
   "updates": [
     {
       "session_id": "sess-1",
@@ -99,6 +115,19 @@ ranges, while the daemon also validates ordering at runtime:
 
 ### Update Fields
 
+- `session_deltas`: optional per-sync session boundary and change facts. It is
+  additive in v2; older consumers may ignore it.
+- `session_deltas[].kind`: one of `started`, `changed`, `unchanged`, `exited`,
+  or `removed`.
+- `session_deltas[].state`, `tool`, and `cwd`: current compact session identity
+  fields when the session is present in the request; omitted for `removed`.
+- `session_deltas[].changed_fields`: enumerated fields that changed since the
+  previous sync for the same `session_id`: `state`, `exited`, `tool`, `cwd`,
+  `replay_text`, and `activity`. It is empty for first observation and removed
+  sessions.
+- `session_deltas[].transcript_ambiguous`: true when multiple current sessions
+  share the same `(tool, cwd)` transcript discovery key, so the engine avoids
+  claiming a single transcript for more than one live session.
 - `timing.run_started_at`: start of the current active run.
 - `timing.run_finished_at`: present only after the run has stopped and the elapsed timer is frozen.
 - `timing.run_elapsed_ms`: live elapsed time while active, frozen elapsed time while stopped.

@@ -604,7 +604,9 @@ fn validate_backend_field(backend: &str) -> Result<(), ThoughtConfigValidationEr
     if ModelBackend::from_env_value(backend).is_none() {
         return Err(ThoughtConfigValidationError::new(
             "backend",
-            format!("unrecognized backend {backend:?}; expected one of: openrouter, claude, codex"),
+            format!(
+                "unrecognized backend {backend:?}; expected one of: openrouter, grok (legacy claude/codex aliases accepted)"
+            ),
         ));
     }
     Ok(())
@@ -892,7 +894,7 @@ mod tests {
 
     #[test]
     fn config_validation_accepts_known_backends() {
-        for backend in ["openrouter", "claude", "codex", ""] {
+        for backend in ["openrouter", "grok", "grok_cli", "claude", "codex", ""] {
             let cfg = ThoughtConfig {
                 backend: backend.to_string(),
                 ..ThoughtConfig::default()

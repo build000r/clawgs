@@ -662,8 +662,7 @@ pub(crate) mod test_support {
 
     /// Single mutex shared across every test that mutates process-wide env
     /// vars consumed by the model client and engine
-    /// (`OPENROUTER_API_KEY`, `CLAWGS_CLAUDE_BIN`, `CLAWGS_CODEX_BIN`,
-    /// `CLAWGS_CLAUDE_MAX_BUDGET`, `SWIMMERS_THOUGHT_MODEL*`, etc.).
+    /// (`OPENROUTER_API_KEY`, `CLAWGS_GROK_BIN`, `SWIMMERS_THOUGHT_MODEL*`, etc.).
     /// Without a single shared lock, model_client tests racing engine tests
     /// can leave the wrong env state visible to whichever test reads first.
     pub(crate) fn process_env_lock() -> &'static Mutex<()> {

@@ -278,15 +278,12 @@ target/release/clawgs demo extract --tool codex --max-actions 5 --max-task-chars
 
 | Variable | Purpose |
 | --- | --- |
-| `CLAWGS_MODEL_BACKEND` | Selects `openrouter`, `claude`, or `codex` for live emit calls |
+| `CLAWGS_MODEL_BACKEND` | Selects `openrouter` or `grok` for live emit calls; legacy `claude`/`codex` values route to Grok |
 | `OPENROUTER_API_KEY` | Enables the OpenRouter backend |
 | `SWIMMERS_THOUGHT_MODEL`, `SWIMMERS_THOUGHT_MODEL_2`, `SWIMMERS_THOUGHT_MODEL_3` | Override live thought models in priority order |
-| `CLAWGS_CODEX_BIN` | Override the `codex` binary path |
-| `CLAWGS_CODEX_REASONING_EFFORT` | Override Codex CLI reasoning effort |
-| `CLAWGS_CODEX_VERBOSITY` | Override Codex CLI verbosity |
-| `CLAWGS_CODEX_WORKDIR` | Override the workdir used for Codex CLI calls |
-| `CLAWGS_CLAUDE_BIN` | Override the `claude` binary path |
-| `CLAWGS_CLAUDE_MAX_BUDGET` | Override the Claude CLI max budget |
+| `CLAWGS_GROK_BIN` | Override the `grok` binary path |
+| `CLAWGS_GROK_WORKDIR` | Override the workdir passed to Grok headless mode |
+| `CLAWGS_GROK_MAX_TURNS` | Override Grok `--max-turns` for unattended headless calls |
 | `CLAWGS_TMUX_BIN` | Override the `tmux` binary path |
 | `CLAWGS_TMUX_SOCKET` | Override the tmux notify socket path |
 

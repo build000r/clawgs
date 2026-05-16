@@ -2087,8 +2087,7 @@ mod tests {
     use super::*;
 
     /// Acquire the crate-wide process-env lock so engine tests cannot race
-    /// model_client tests on `CLAWGS_CLAUDE_BIN`, `CLAWGS_CODEX_BIN`, or
-    /// `OPENROUTER_API_KEY`.
+    /// model_client tests on `CLAWGS_GROK_BIN` or `OPENROUTER_API_KEY`.
     fn lock_env() -> MutexGuard<'static, ()> {
         crate::test_support::process_env_lock()
             .lock()
@@ -2489,7 +2488,7 @@ mod tests {
     #[test]
     fn model_completion_failure_suppresses_update_and_reports_error() {
         let now = Utc::now();
-        let mut engine = failing_engine("codex exec failed: not authenticated");
+        let mut engine = failing_engine("grok headless failed: not authenticated");
 
         let request = SyncRequest {
             id: "req-1".to_string(),
@@ -2503,7 +2502,7 @@ mod tests {
         assert_eq!(result.metrics.llm_calls, 0);
         assert_eq!(
             result.metrics.last_backend_error.as_deref(),
-            Some("codex exec failed: not authenticated")
+            Some("grok headless failed: not authenticated")
         );
         assert!(result.metrics.suppressed > 0);
     }
@@ -2561,16 +2560,14 @@ mod tests {
     #[test]
     fn ensure_client_carries_forward_when_override_backend_credentials_missing() {
         // The default backend has a working mock client, but the request
-        // overrides to ClaudeCli. With CLAWGS_CLAUDE_BIN pointed at a path
-        // that doesn't exist, validate_backend_credentials should fail with
+        // overrides to the Grok CLI backend. With CLAWGS_GROK_BIN pointed at
+        // a path that doesn't exist, validate_backend_credentials should fail with
         // allow_carry_forward=true, which means metrics record the error and
         // every active session is carried forward (suppressed) rather than
         // emitted.
         let _lock = lock_env();
-        let prior_claude = std::env::var("CLAWGS_CLAUDE_BIN").ok();
-        let prior_codex = std::env::var("CLAWGS_CODEX_BIN").ok();
-        std::env::set_var("CLAWGS_CLAUDE_BIN", "/nonexistent/claude-zzz");
-        std::env::set_var("CLAWGS_CODEX_BIN", "/nonexistent/codex-zzz");
+        let prior_grok = std::env::var("CLAWGS_GROK_BIN").ok();
+        std::env::set_var("CLAWGS_GROK_BIN", "/nonexistent/grok-zzz");
 
         let now = Utc::now();
         let mut engine = mock_engine("ignored — never invoked");
@@ -2597,8 +2594,8 @@ mod tests {
                 .metrics
                 .last_backend_error
                 .as_deref()
-                .is_some_and(|err| err.starts_with("claude:") && err.contains("not found")),
-            "expected claude credential error, got {:?}",
+                .is_some_and(|err| err.starts_with("grok:") && err.contains("not found")),
+            "expected grok credential error, got {:?}",
             result.metrics.last_backend_error
         );
         assert!(
@@ -2606,21 +2603,17 @@ mod tests {
             "carry-forward must record at least one suppressed session"
         );
 
-        match prior_claude {
-            Some(value) => std::env::set_var("CLAWGS_CLAUDE_BIN", value),
-            None => std::env::remove_var("CLAWGS_CLAUDE_BIN"),
-        }
-        match prior_codex {
-            Some(value) => std::env::set_var("CLAWGS_CODEX_BIN", value),
-            None => std::env::remove_var("CLAWGS_CODEX_BIN"),
+        match prior_grok {
+            Some(value) => std::env::set_var("CLAWGS_GROK_BIN", value),
+            None => std::env::remove_var("CLAWGS_GROK_BIN"),
         }
     }
 
     #[test]
     fn credential_failure_still_emits_action_cue_state_change() {
         let _lock = lock_env();
-        let prior_claude = std::env::var("CLAWGS_CLAUDE_BIN").ok();
-        std::env::set_var("CLAWGS_CLAUDE_BIN", "/nonexistent/claude-zzz");
+        let prior_grok = std::env::var("CLAWGS_GROK_BIN").ok();
+        std::env::set_var("CLAWGS_GROK_BIN", "/nonexistent/grok-zzz");
 
         let temp = tempdir().expect("tempdir");
         let transcript = temp.path().join("cue-only.jsonl");
@@ -2667,8 +2660,8 @@ mod tests {
                 .metrics
                 .last_backend_error
                 .as_deref()
-                .is_some_and(|err| err.starts_with("claude:") && err.contains("not found")),
-            "expected claude credential error, got {:?}",
+                .is_some_and(|err| err.starts_with("grok:") && err.contains("not found")),
+            "expected grok credential error, got {:?}",
             result.metrics.last_backend_error
         );
         assert_eq!(
@@ -2676,17 +2669,17 @@ mod tests {
             crate::ActionCueKind::ValidationMissingAfterEdit
         );
 
-        match prior_claude {
-            Some(value) => std::env::set_var("CLAWGS_CLAUDE_BIN", value),
-            None => std::env::remove_var("CLAWGS_CLAUDE_BIN"),
+        match prior_grok {
+            Some(value) => std::env::set_var("CLAWGS_GROK_BIN", value),
+            None => std::env::remove_var("CLAWGS_GROK_BIN"),
         }
     }
 
     #[test]
     fn credential_failure_emits_first_inbound_action_cue() {
         let _lock = lock_env();
-        let prior_claude = std::env::var("CLAWGS_CLAUDE_BIN").ok();
-        std::env::set_var("CLAWGS_CLAUDE_BIN", "/nonexistent/claude-zzz");
+        let prior_grok = std::env::var("CLAWGS_GROK_BIN").ok();
+        std::env::set_var("CLAWGS_GROK_BIN", "/nonexistent/grok-zzz");
 
         let now = Utc::now();
         let mut engine = mock_engine("ignored");
@@ -2711,25 +2704,25 @@ mod tests {
                 .metrics
                 .last_backend_error
                 .as_deref()
-                .is_some_and(|err| err.starts_with("claude:") && err.contains("not found")),
-            "expected claude credential error, got {:?}",
+                .is_some_and(|err| err.starts_with("grok:") && err.contains("not found")),
+            "expected grok credential error, got {:?}",
             result.metrics.last_backend_error
         );
         assert_eq!(result.updates[0].action_cues, vec![awaiting_user_cue()]);
         assert_eq!(result.updates[0].rest_state, RestState::Sleeping);
         assert_eq!(result.updates[0].thought_state, ThoughtState::Sleeping);
 
-        match prior_claude {
-            Some(value) => std::env::set_var("CLAWGS_CLAUDE_BIN", value),
-            None => std::env::remove_var("CLAWGS_CLAUDE_BIN"),
+        match prior_grok {
+            Some(value) => std::env::set_var("CLAWGS_GROK_BIN", value),
+            None => std::env::remove_var("CLAWGS_GROK_BIN"),
         }
     }
 
     #[test]
     fn credential_failure_wake_clears_stale_sleeping_thought() {
         let _lock = lock_env();
-        let prior_claude = std::env::var("CLAWGS_CLAUDE_BIN").ok();
-        std::env::set_var("CLAWGS_CLAUDE_BIN", "/nonexistent/claude-zzz");
+        let prior_grok = std::env::var("CLAWGS_GROK_BIN").ok();
+        std::env::set_var("CLAWGS_GROK_BIN", "/nonexistent/grok-zzz");
 
         let now = Utc::now();
         let mut engine = mock_engine("ignored");
@@ -2763,26 +2756,26 @@ mod tests {
         assert_eq!(result.updates[0].rest_state, RestState::Active);
         assert_eq!(result.updates[0].thought_state, ThoughtState::Holding);
 
-        match prior_claude {
-            Some(value) => std::env::set_var("CLAWGS_CLAUDE_BIN", value),
-            None => std::env::remove_var("CLAWGS_CLAUDE_BIN"),
+        match prior_grok {
+            Some(value) => std::env::set_var("CLAWGS_GROK_BIN", value),
+            None => std::env::remove_var("CLAWGS_GROK_BIN"),
         }
     }
 
     #[test]
     fn ensure_client_builds_real_client_when_credentials_validate() {
-        // Default backend has a mock client; the request overrides to ClaudeCli.
-        // With CLAWGS_CLAUDE_BIN pointed at /usr/bin/true, validate_backend_credentials
+        // Default backend has a mock client; the request overrides to Grok CLI.
+        // With CLAWGS_GROK_BIN pointed at /usr/bin/true, validate_backend_credentials
         // succeeds and build_model_client_for actually constructs a
-        // ClaudeCliModelClient. The subsequent complete() call against
+        // GrokCliModelClient. The subsequent complete() call against
         // /usr/bin/true exits 0 with empty stdout and surfaces an error,
         // which is enough to confirm the build branch executed.
         let _lock = lock_env();
-        let prior_claude = std::env::var("CLAWGS_CLAUDE_BIN").ok();
-        std::env::set_var("CLAWGS_CLAUDE_BIN", "/usr/bin/true");
+        let prior_grok = std::env::var("CLAWGS_GROK_BIN").ok();
+        std::env::set_var("CLAWGS_GROK_BIN", "/usr/bin/true");
 
         let now = Utc::now();
-        let mut engine = mock_engine("never invoked because override picks claude");
+        let mut engine = mock_engine("never invoked because override picks grok");
         let config = ThoughtConfig {
             backend: "claude".to_string(),
             ..ThoughtConfig::default()
@@ -2795,7 +2788,7 @@ mod tests {
         };
 
         let result = engine.sync(&request);
-        // build_model_client_for(Claude) ran, complete() then ran on /usr/bin/true.
+        // build_model_client_for(Grok) ran, complete() then ran on /usr/bin/true.
         // Either it surfaced a backend_error from the empty CLI output or it
         // emitted a thought (unlikely for /usr/bin/true). Either way,
         // ensure_client did not short-circuit on credentials.
@@ -2809,9 +2802,9 @@ mod tests {
             result.metrics.last_backend_error
         );
 
-        match prior_claude {
-            Some(value) => std::env::set_var("CLAWGS_CLAUDE_BIN", value),
-            None => std::env::remove_var("CLAWGS_CLAUDE_BIN"),
+        match prior_grok {
+            Some(value) => std::env::set_var("CLAWGS_GROK_BIN", value),
+            None => std::env::remove_var("CLAWGS_GROK_BIN"),
         }
     }
 

@@ -123,7 +123,7 @@
         },
         "backend": {
           "type": "string",
-          "enum": ["", "openrouter", "claude", "codex"]
+          "enum": ["", "openrouter", "grok", "claude", "codex"]
         },
         "cadence_hot_ms": {
           "type": "integer",

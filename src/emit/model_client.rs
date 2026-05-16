@@ -8,23 +8,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const OPENROUTER_TIMEOUT: Duration = Duration::from_secs(15);
 const OPENROUTER_CHAT_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-const CODEX_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
-const CLAUDE_CLI_TIMEOUT: Duration = Duration::from_secs(30);
+const GROK_CLI_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/free";
-const DEFAULT_CODEX_CLI_MODEL: &str = "gpt-5.1-codex-mini";
-const DEFAULT_CODEX_CLI_REASONING: &str = "low";
-const DEFAULT_CODEX_CLI_VERBOSITY: &str = "low";
-const DEFAULT_CLAUDE_CLI_MODEL: &str = "haiku";
-const DEFAULT_CLAUDE_CLI_MAX_BUDGET: &str = "0.02";
+const DEFAULT_GROK_CLI_MODEL: &str = "";
+const DEFAULT_GROK_MAX_TURNS: u32 = 20;
 const MODEL_BACKEND_ENV: &str = "CLAWGS_MODEL_BACKEND";
-const CODEX_BIN_ENV: &str = "CLAWGS_CODEX_BIN";
-const CODEX_REASONING_ENV: &str = "CLAWGS_CODEX_REASONING_EFFORT";
-const CODEX_VERBOSITY_ENV: &str = "CLAWGS_CODEX_VERBOSITY";
-const CODEX_WORKDIR_ENV: &str = "CLAWGS_CODEX_WORKDIR";
-const CODEX_RUNTIME_DIR: &str = "clawgs-codex-exec";
-const CLAUDE_BIN_ENV: &str = "CLAWGS_CLAUDE_BIN";
-const CLAUDE_MAX_BUDGET_ENV: &str = "CLAWGS_CLAUDE_MAX_BUDGET";
-const CLAUDE_RUNTIME_DIR: &str = "clawgs-claude-exec";
+const GROK_BIN_ENV: &str = "CLAWGS_GROK_BIN";
+const GROK_WORKDIR_ENV: &str = "CLAWGS_GROK_WORKDIR";
+const GROK_MAX_TURNS_ENV: &str = "CLAWGS_GROK_MAX_TURNS";
+const GROK_RUNTIME_DIR: &str = "clawgs-grok-headless";
 const MODEL_ENV_KEYS: [&str; 3] = [
     "SWIMMERS_THOUGHT_MODEL",
     "SWIMMERS_THOUGHT_MODEL_2",
@@ -34,16 +26,16 @@ const MODEL_ENV_KEYS: [&str; 3] = [
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ModelBackend {
     OpenRouter,
-    CodexCli,
-    ClaudeCli,
+    GrokCli,
 }
 
 impl ModelBackend {
     pub fn from_env_value(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "openrouter" => Some(Self::OpenRouter),
-            "codex" | "codex_cli" | "codex-cli" => Some(Self::CodexCli),
-            "claude" | "claude_cli" | "claude-cli" => Some(Self::ClaudeCli),
+            "grok" | "grok_cli" | "grok-cli" => Some(Self::GrokCli),
+            "codex" | "codex_cli" | "codex-cli" => Some(Self::GrokCli),
+            "claude" | "claude_cli" | "claude-cli" => Some(Self::GrokCli),
             _ => None,
         }
     }
@@ -51,8 +43,7 @@ impl ModelBackend {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::OpenRouter => "openrouter",
-            Self::CodexCli => "codex",
-            Self::ClaudeCli => "claude",
+            Self::GrokCli => "grok",
         }
     }
 }
@@ -70,8 +61,7 @@ pub fn build_model_client_for(backend: ModelBackend) -> Result<Box<dyn ModelClie
         ModelBackend::OpenRouter => {
             OpenRouterModelClient::new().map(|client| Box::new(client) as Box<dyn ModelClient>)
         }
-        ModelBackend::CodexCli => Ok(Box::new(CodexCliModelClient::new())),
-        ModelBackend::ClaudeCli => Ok(Box::new(ClaudeCliModelClient::new())),
+        ModelBackend::GrokCli => Ok(Box::new(GrokCliModelClient::new())),
     }
 }
 
@@ -83,15 +73,9 @@ pub fn validate_backend_credentials(backend: ModelBackend) -> Result<(), String>
             }
             Ok(())
         }
-        ModelBackend::CodexCli => {
-            if !command_available(CODEX_BIN_ENV, "codex") {
-                return Err(format!("{}: codex binary not found", backend.as_str()));
-            }
-            Ok(())
-        }
-        ModelBackend::ClaudeCli => {
-            if !command_available(CLAUDE_BIN_ENV, "claude") {
-                return Err(format!("{}: claude binary not found", backend.as_str()));
+        ModelBackend::GrokCli => {
+            if !command_available(GROK_BIN_ENV, "grok") {
+                return Err(format!("{}: grok binary not found", backend.as_str()));
             }
             Ok(())
         }
@@ -147,12 +131,11 @@ impl ModelClient for OpenRouterModelClient {
     }
 }
 
-pub struct CodexCliModelClient {
+pub struct GrokCliModelClient {
     bin: String,
     runtime_dir: PathBuf,
     workdir: PathBuf,
-    reasoning_effort: String,
-    verbosity: String,
+    max_turns: String,
 }
 
 struct TempFileGuard {
@@ -175,195 +158,69 @@ impl Drop for TempFileGuard {
     }
 }
 
-/// Codex `model_reasoning_effort` accepts a fixed set of values; any other
-/// value would be rejected by the upstream `codex exec` invocation later, so
-/// we fall back to the default at startup with a warning instead of failing
-/// the daemon mid-loop.
-const REASONING_EFFORT_ALLOWED: &[&str] = &["minimal", "low", "medium", "high"];
-/// Codex `model_verbosity` allowlist (same rationale as reasoning_effort).
-const VERBOSITY_ALLOWED: &[&str] = &["low", "medium", "high"];
-
-fn validated_codex_setting(env_key: &str, default: &str, allowed: &[&str]) -> String {
-    match nonempty_env_var(env_key) {
-        Some(value) if allowed.iter().any(|candidate| *candidate == value) => value,
-        Some(value) => {
-            eprintln!(
-                "clawgs: ignoring {env_key}={value:?}; expected one of {allowed:?}. \
-                 Falling back to {default:?}."
-            );
-            default.to_string()
-        }
-        None => default.to_string(),
-    }
-}
-
-impl CodexCliModelClient {
+impl GrokCliModelClient {
     pub fn new() -> Self {
         Self {
-            bin: configured_bin(CODEX_BIN_ENV, "codex"),
-            runtime_dir: std::env::temp_dir().join(CODEX_RUNTIME_DIR),
-            workdir: nonempty_env_var(CODEX_WORKDIR_ENV)
+            bin: configured_bin(GROK_BIN_ENV, "grok"),
+            runtime_dir: std::env::temp_dir().join(GROK_RUNTIME_DIR),
+            workdir: nonempty_env_var(GROK_WORKDIR_ENV)
                 .map(PathBuf::from)
                 .unwrap_or_else(std::env::temp_dir),
-            reasoning_effort: validated_codex_setting(
-                CODEX_REASONING_ENV,
-                DEFAULT_CODEX_CLI_REASONING,
-                REASONING_EFFORT_ALLOWED,
-            ),
-            verbosity: validated_codex_setting(
-                CODEX_VERBOSITY_ENV,
-                DEFAULT_CODEX_CLI_VERBOSITY,
-                VERBOSITY_ALLOWED,
-            ),
+            max_turns: configured_positive_u32(GROK_MAX_TURNS_ENV, DEFAULT_GROK_MAX_TURNS)
+                .to_string(),
         }
     }
 }
 
-impl Default for CodexCliModelClient {
+impl Default for GrokCliModelClient {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ModelClient for CodexCliModelClient {
+impl ModelClient for GrokCliModelClient {
     fn complete(&self, prompt: &str, model_override: Option<&str>) -> Result<String, String> {
-        let model = candidate_models(model_override, ModelBackend::CodexCli)
+        let model = candidate_models(model_override, ModelBackend::GrokCli)
             .into_iter()
             .next()
-            .ok_or_else(|| "no models configured".to_string())?;
+            .unwrap_or_default();
 
         fs::create_dir_all(&self.runtime_dir)
             .map_err(|error| format!("failed to create {}: {error}", self.runtime_dir.display()))?;
 
         let stamp = unique_stamp();
-        let output_path = self.runtime_dir.join(format!("{stamp}.last.txt"));
+        let prompt_path = self.runtime_dir.join(format!("{stamp}.prompt.txt"));
         let stdout_path = self.runtime_dir.join(format!("{stamp}.stdout.log"));
         let stderr_path = self.runtime_dir.join(format!("{stamp}.stderr.log"));
-
-        // RAII guard: each invocation creates three files in `runtime_dir`.
-        // Without explicit cleanup they would accumulate forever in a
-        // long-lived `tmux-emit` daemon. Drop runs on every exit path,
-        // including early `?` returns, panics, and timeouts.
         let _cleanup = TempFileGuard::new(&[
-            output_path.as_path(),
+            prompt_path.as_path(),
             stdout_path.as_path(),
             stderr_path.as_path(),
         ]);
 
+        fs::write(&prompt_path, prompt)
+            .map_err(|error| format!("failed to write {}: {error}", prompt_path.display()))?;
+
         let output = run_subprocess_capturing(SubprocessSpec {
             bin: &self.bin,
-            args: build_codex_exec_args(
-                &model,
-                &output_path,
-                &self.workdir,
-                &self.reasoning_effort,
-                &self.verbosity,
-            ),
-            stdin_payload: prompt.as_bytes(),
+            args: build_grok_headless_args(&model, &prompt_path, &self.workdir, &self.max_turns),
+            stdin_payload: &[],
             stdout_path: &stdout_path,
             stderr_path: &stderr_path,
-            timeout: CODEX_EXEC_TIMEOUT,
-            label: "codex exec",
+            timeout: GROK_CLI_TIMEOUT,
+            label: "grok headless",
         })?;
 
         if !output.success {
             return Err(format!(
-                "codex exec failed: {}",
-                failure_preview(&output.stderr, &output.stdout)
-            ));
-        }
-
-        let content = fs::read_to_string(&output_path).map_err(|error| {
-            format!(
-                "codex exec succeeded but {} was missing: {error}",
-                output_path.display()
-            )
-        })?;
-        let trimmed = content.trim();
-        if trimmed.is_empty() {
-            return Err("codex exec returned an empty final message".to_string());
-        }
-        Ok(trimmed.to_string())
-    }
-}
-
-pub struct ClaudeCliModelClient {
-    bin: String,
-    runtime_dir: PathBuf,
-    max_budget: String,
-}
-
-impl ClaudeCliModelClient {
-    pub fn new() -> Self {
-        Self {
-            bin: configured_bin(CLAUDE_BIN_ENV, "claude"),
-            runtime_dir: std::env::temp_dir().join(CLAUDE_RUNTIME_DIR),
-            max_budget: nonempty_env_var(CLAUDE_MAX_BUDGET_ENV)
-                .unwrap_or_else(|| DEFAULT_CLAUDE_CLI_MAX_BUDGET.to_string()),
-        }
-    }
-}
-
-impl Default for ClaudeCliModelClient {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ModelClient for ClaudeCliModelClient {
-    fn complete(&self, prompt: &str, model_override: Option<&str>) -> Result<String, String> {
-        let model = model_override
-            .map(|m| m.to_string())
-            .or_else(|| {
-                candidate_models(None, ModelBackend::ClaudeCli)
-                    .into_iter()
-                    .next()
-            })
-            .unwrap_or_else(|| DEFAULT_CLAUDE_CLI_MODEL.to_string());
-
-        fs::create_dir_all(&self.runtime_dir)
-            .map_err(|error| format!("failed to create {}: {error}", self.runtime_dir.display()))?;
-
-        let stamp = unique_stamp();
-        let stdout_path = self.runtime_dir.join(format!("{stamp}.stdout.log"));
-        let stderr_path = self.runtime_dir.join(format!("{stamp}.stderr.log"));
-        let _cleanup = TempFileGuard::new(&[stdout_path.as_path(), stderr_path.as_path()]);
-
-        let args = [
-            "--print",
-            "--model",
-            &model,
-            "--bare",
-            "--output-format",
-            "text",
-            "--no-session-persistence",
-            "--max-budget-usd",
-            &self.max_budget,
-        ]
-        .into_iter()
-        .map(OsString::from)
-        .collect::<Vec<_>>();
-
-        let output = run_subprocess_capturing(SubprocessSpec {
-            bin: &self.bin,
-            args,
-            stdin_payload: prompt.as_bytes(),
-            stdout_path: &stdout_path,
-            stderr_path: &stderr_path,
-            timeout: CLAUDE_CLI_TIMEOUT,
-            label: "claude exec",
-        })?;
-
-        if !output.success {
-            return Err(format!(
-                "claude exec failed: {}",
+                "grok headless failed: {}",
                 failure_preview(&output.stderr, &output.stdout)
             ));
         }
 
         let trimmed = output.stdout.trim();
         if trimmed.is_empty() {
-            return Err("claude exec returned empty output".to_string());
+            return Err("grok headless returned empty output".to_string());
         }
         Ok(trimmed.to_string())
     }
@@ -372,10 +229,8 @@ impl ModelClient for ClaudeCliModelClient {
 fn auto_detect_model_backend() -> ModelBackend {
     if nonempty_env_var("OPENROUTER_API_KEY").is_some() {
         ModelBackend::OpenRouter
-    } else if command_available(CLAUDE_BIN_ENV, "claude") {
-        ModelBackend::ClaudeCli
-    } else if command_available(CODEX_BIN_ENV, "codex") {
-        ModelBackend::CodexCli
+    } else if command_available(GROK_BIN_ENV, "grok") {
+        ModelBackend::GrokCli
     } else {
         ModelBackend::OpenRouter
     }
@@ -416,36 +271,40 @@ fn configured_models(backend: ModelBackend) -> Vec<String> {
 fn backend_default_model(backend: ModelBackend) -> Option<&'static str> {
     match backend {
         ModelBackend::OpenRouter => Some(DEFAULT_OPENROUTER_MODEL),
-        ModelBackend::CodexCli => Some(DEFAULT_CODEX_CLI_MODEL),
-        ModelBackend::ClaudeCli => Some(DEFAULT_CLAUDE_CLI_MODEL),
+        ModelBackend::GrokCli => Some(DEFAULT_GROK_CLI_MODEL),
     }
 }
 
-fn build_codex_exec_args(
+fn configured_positive_u32(env_key: &str, default: u32) -> u32 {
+    nonempty_env_var(env_key)
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn build_grok_headless_args(
     model: &str,
-    output_path: &Path,
+    prompt_path: &Path,
     workdir: &Path,
-    reasoning_effort: &str,
-    verbosity: &str,
+    max_turns: &str,
 ) -> Vec<OsString> {
-    vec![
-        OsString::from("exec"),
-        OsString::from("-m"),
-        OsString::from(model),
-        OsString::from("-C"),
+    let mut args = vec![
+        OsString::from("--prompt-file"),
+        prompt_path.as_os_str().to_os_string(),
+        OsString::from("--output-format"),
+        OsString::from("plain"),
+        OsString::from("--always-approve"),
+        OsString::from("--no-alt-screen"),
+        OsString::from("--max-turns"),
+        OsString::from(max_turns),
+        OsString::from("--cwd"),
         workdir.as_os_str().to_os_string(),
-        OsString::from("--skip-git-repo-check"),
-        OsString::from("--ephemeral"),
-        OsString::from("--output-last-message"),
-        output_path.as_os_str().to_os_string(),
-        OsString::from("-c"),
-        OsString::from(format!("model_reasoning_effort={reasoning_effort:?}")),
-        OsString::from("-c"),
-        OsString::from(format!("model_verbosity={verbosity:?}")),
-        OsString::from("-c"),
-        OsString::from("model_reasoning_summary=\"none\""),
-        OsString::from("-"),
-    ]
+    ];
+    if !model.trim().is_empty() {
+        args.push(OsString::from("-m"));
+        args.push(OsString::from(model));
+    }
+    args
 }
 
 struct SubprocessSpec<'a> {
@@ -703,17 +562,16 @@ mod tests {
     }
 
     use super::{
-        build_codex_exec_args, build_openrouter_request_body, default_model_for_backend,
+        build_grok_headless_args, build_openrouter_request_body, default_model_for_backend,
         extract_openrouter_content, failure_preview, interpret_openrouter_response,
         pick_nonempty_or_fallback, run_subprocess_capturing, thought_models,
-        validate_backend_credentials, validated_codex_setting, ClaudeCliModelClient,
-        CodexCliModelClient, ModelBackend, ModelClient, OpenRouterModelClient, SubprocessSpec,
-        REASONING_EFFORT_ALLOWED, VERBOSITY_ALLOWED,
+        validate_backend_credentials, GrokCliModelClient, ModelBackend, ModelClient,
+        OpenRouterModelClient, SubprocessSpec,
     };
 
     #[test]
     fn thought_models_prefers_override() {
-        let models = thought_models(Some("custom/model"), ModelBackend::CodexCli);
+        let models = thought_models(Some("custom/model"), ModelBackend::GrokCli);
         assert_eq!(models, vec!["custom/model".to_string()]);
     }
 
@@ -737,49 +595,15 @@ mod tests {
     }
 
     #[test]
-    fn validated_codex_setting_accepts_allowlisted_values_and_rejects_others() {
-        let _lock = lock_env();
-        std::env::set_var("CLAWGS_TEST_REASONING", "high");
-        assert_eq!(
-            validated_codex_setting("CLAWGS_TEST_REASONING", "low", REASONING_EFFORT_ALLOWED),
-            "high"
-        );
-
-        // Empty / whitespace-only values fall through to default.
-        std::env::set_var("CLAWGS_TEST_REASONING", "   ");
-        assert_eq!(
-            validated_codex_setting("CLAWGS_TEST_REASONING", "low", REASONING_EFFORT_ALLOWED),
-            "low"
-        );
-
-        // Bogus values fall back to default (with a stderr warning).
-        std::env::set_var("CLAWGS_TEST_REASONING", "evil\"; rm -rf /");
-        assert_eq!(
-            validated_codex_setting("CLAWGS_TEST_REASONING", "low", REASONING_EFFORT_ALLOWED),
-            "low"
-        );
-
-        // Verbosity allowlist excludes "minimal".
-        std::env::set_var("CLAWGS_TEST_VERBOSITY", "minimal");
-        assert_eq!(
-            validated_codex_setting("CLAWGS_TEST_VERBOSITY", "low", VERBOSITY_ALLOWED),
-            "low"
-        );
-
-        std::env::remove_var("CLAWGS_TEST_REASONING");
-        std::env::remove_var("CLAWGS_TEST_VERBOSITY");
-    }
-
-    #[test]
-    fn codex_backend_falls_back_to_headless_codex_default_model() {
+    fn grok_backend_uses_cli_default_model_when_unset() {
         let _lock = lock_env();
         std::env::remove_var("SWIMMERS_THOUGHT_MODEL");
         std::env::remove_var("SWIMMERS_THOUGHT_MODEL_2");
         std::env::remove_var("SWIMMERS_THOUGHT_MODEL_3");
 
-        let model = default_model_for_backend(ModelBackend::CodexCli);
+        let model = default_model_for_backend(ModelBackend::GrokCli);
 
-        assert_eq!(model, "gpt-5.1-codex-mini");
+        assert!(model.is_empty());
     }
 
     #[test]
@@ -818,56 +642,68 @@ mod tests {
     }
 
     #[test]
-    fn build_codex_exec_args_pins_low_reasoning_and_low_verbosity() {
-        let args = build_codex_exec_args(
-            "gpt-5.1-codex-mini",
-            Path::new("/tmp/last.txt"),
-            Path::new("/tmp"),
-            "low",
-            "low",
+    fn build_grok_headless_args_uses_prompt_file_and_optional_model() {
+        let args = build_grok_headless_args(
+            "grok-4",
+            Path::new("/tmp/prompt.txt"),
+            Path::new("/tmp/project"),
+            "20",
         );
         let args: Vec<String> = args
             .into_iter()
             .map(|value| value.to_string_lossy().into_owned())
             .collect();
 
-        assert!(args.contains(&"exec".to_string()));
-        assert!(args.contains(&"gpt-5.1-codex-mini".to_string()));
-        assert!(args.contains(&"model_reasoning_effort=\"low\"".to_string()));
-        assert!(args.contains(&"model_verbosity=\"low\"".to_string()));
-        assert!(args.contains(&"model_reasoning_summary=\"none\"".to_string()));
-        assert!(args.contains(&"--ephemeral".to_string()));
+        assert!(args.contains(&"--prompt-file".to_string()));
+        assert!(args.contains(&"/tmp/prompt.txt".to_string()));
+        assert!(args.contains(&"--output-format".to_string()));
+        assert!(args.contains(&"plain".to_string()));
+        assert!(args.contains(&"--always-approve".to_string()));
+        assert!(args.contains(&"--max-turns".to_string()));
+        assert!(args.contains(&"20".to_string()));
+        assert!(args.contains(&"--cwd".to_string()));
+        assert!(args.contains(&"/tmp/project".to_string()));
+        assert!(args.contains(&"-m".to_string()));
+        assert!(args.contains(&"grok-4".to_string()));
+
+        let args_without_model = build_grok_headless_args(
+            "",
+            Path::new("/tmp/prompt.txt"),
+            Path::new("/tmp/project"),
+            "20",
+        );
+        let args_without_model: Vec<String> = args_without_model
+            .into_iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect();
+        assert!(!args_without_model.contains(&"-m".to_string()));
     }
 
     #[test]
-    fn claude_backend_falls_back_to_haiku_default_model() {
-        let _lock = lock_env();
-        std::env::remove_var("SWIMMERS_THOUGHT_MODEL");
-        std::env::remove_var("SWIMMERS_THOUGHT_MODEL_2");
-        std::env::remove_var("SWIMMERS_THOUGHT_MODEL_3");
-
-        let model = default_model_for_backend(ModelBackend::ClaudeCli);
-
-        assert_eq!(model, "haiku");
-    }
-
-    #[test]
-    fn model_backend_from_env_value_parses_claude_variants() {
+    fn model_backend_from_env_value_maps_cli_aliases_to_grok() {
         assert_eq!(
             ModelBackend::from_env_value("claude"),
-            Some(ModelBackend::ClaudeCli)
+            Some(ModelBackend::GrokCli)
         );
         assert_eq!(
             ModelBackend::from_env_value("claude_cli"),
-            Some(ModelBackend::ClaudeCli)
+            Some(ModelBackend::GrokCli)
         );
         assert_eq!(
             ModelBackend::from_env_value("claude-cli"),
-            Some(ModelBackend::ClaudeCli)
+            Some(ModelBackend::GrokCli)
         );
         assert_eq!(
             ModelBackend::from_env_value("CLAUDE"),
-            Some(ModelBackend::ClaudeCli)
+            Some(ModelBackend::GrokCli)
+        );
+        assert_eq!(
+            ModelBackend::from_env_value("codex"),
+            Some(ModelBackend::GrokCli)
+        );
+        assert_eq!(
+            ModelBackend::from_env_value("grok_cli"),
+            Some(ModelBackend::GrokCli)
         );
     }
 
@@ -880,8 +716,7 @@ mod tests {
     #[test]
     fn model_backend_as_str_roundtrips() {
         assert_eq!(ModelBackend::OpenRouter.as_str(), "openrouter");
-        assert_eq!(ModelBackend::CodexCli.as_str(), "codex");
-        assert_eq!(ModelBackend::ClaudeCli.as_str(), "claude");
+        assert_eq!(ModelBackend::GrokCli.as_str(), "grok");
     }
 
     #[test]
@@ -896,46 +731,14 @@ mod tests {
     }
 
     #[test]
-    fn claude_client_handles_large_stdout_without_pipe_deadlock() {
-        use std::fs;
-        use std::os::unix::fs::PermissionsExt;
-        use tempfile::tempdir;
-
-        let dir = tempdir().expect("tempdir");
-        let script_path = dir.path().join("fake-claude");
-        fs::write(
-            &script_path,
-            concat!(
-                "#!/bin/sh\n",
-                "cat >/dev/null\n",
-                "i=0\n",
-                "while [ \"$i\" -lt 2000 ]; do\n",
-                "  printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n'\n",
-                "  i=$((i + 1))\n",
-                "done\n"
-            ),
-        )
-        .expect("write fake claude");
-        let mut permissions = fs::metadata(&script_path)
-            .expect("script metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script_path, permissions).expect("chmod");
-
-        let client = ClaudeCliModelClient {
-            bin: script_path.to_string_lossy().into_owned(),
-            runtime_dir: dir.path().join("runtime"),
-            max_budget: "0.01".to_string(),
-        };
-
-        let output = client
-            .complete("status prompt", Some("fake-model"))
-            .expect("large stdout should complete");
-
-        assert!(
-            output.len() > 100_000,
-            "test fixture must exceed a typical pipe buffer"
-        );
+    fn validate_backend_credentials_rejects_missing_grok_binary() {
+        let _lock = lock_env();
+        std::env::set_var("CLAWGS_GROK_BIN", "/nonexistent/clawgs-grok-zzz");
+        let err = validate_backend_credentials(ModelBackend::GrokCli)
+            .expect_err("must fail when grok bin missing");
+        assert!(err.starts_with("grok:"));
+        assert!(err.contains("not found"));
+        std::env::remove_var("CLAWGS_GROK_BIN");
     }
 
     #[test]
@@ -1029,33 +832,11 @@ mod tests {
         assert_eq!(preview.chars().count(), 500);
     }
 
-    #[test]
-    fn validate_backend_credentials_rejects_missing_codex_binary() {
-        let _lock = lock_env();
-        std::env::set_var("CLAWGS_CODEX_BIN", "/nonexistent/clawgs-codex-zzz");
-        let err = validate_backend_credentials(ModelBackend::CodexCli)
-            .expect_err("must fail when codex bin missing");
-        assert!(err.starts_with("codex:"));
-        assert!(err.contains("not found"));
-        std::env::remove_var("CLAWGS_CODEX_BIN");
-    }
-
-    #[test]
-    fn validate_backend_credentials_rejects_missing_claude_binary() {
-        let _lock = lock_env();
-        std::env::set_var("CLAWGS_CLAUDE_BIN", "/nonexistent/clawgs-claude-zzz");
-        let err = validate_backend_credentials(ModelBackend::ClaudeCli)
-            .expect_err("must fail when claude bin missing");
-        assert!(err.starts_with("claude:"));
-        assert!(err.contains("not found"));
-        std::env::remove_var("CLAWGS_CLAUDE_BIN");
-    }
-
-    fn write_fake_codex(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+    fn write_fake_backend(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
-        let script = dir.join("fake-codex");
-        fs::write(&script, body).expect("write fake codex");
+        let script = dir.join("fake-backend");
+        fs::write(&script, body).expect("write fake backend");
         let mut permissions = fs::metadata(&script)
             .expect("script metadata")
             .permissions();
@@ -1082,7 +863,7 @@ mod tests {
         use tempfile::tempdir;
 
         let dir = tempdir().expect("tempdir");
-        let script = write_fake_codex(
+        let script = write_fake_backend(
             dir.path(),
             concat!(
                 "#!/bin/sh\n",
@@ -1115,99 +896,6 @@ mod tests {
         );
     }
 
-    fn build_codex_test_client(
-        bin: std::path::PathBuf,
-        runtime_dir: std::path::PathBuf,
-        workdir: std::path::PathBuf,
-    ) -> CodexCliModelClient {
-        CodexCliModelClient {
-            bin: bin.to_string_lossy().into_owned(),
-            runtime_dir,
-            workdir,
-            reasoning_effort: "low".to_string(),
-            verbosity: "low".to_string(),
-        }
-    }
-
-    #[test]
-    fn codex_client_complete_returns_trimmed_last_message() {
-        use tempfile::tempdir;
-        let dir = tempdir().expect("tempdir");
-        // Fake codex finds --output-last-message in argv, writes a payload there,
-        // then exits 0. Real codex contract: write the model's last message to
-        // the path passed via --output-last-message.
-        let script = write_fake_codex(
-            dir.path(),
-            concat!(
-                "#!/bin/sh\n",
-                "cat >/dev/null\n",
-                "out=\"\"\n",
-                "while [ \"$#\" -gt 0 ]; do\n",
-                "  if [ \"$1\" = \"--output-last-message\" ]; then\n",
-                "    out=\"$2\"; shift 2; continue\n",
-                "  fi\n",
-                "  shift\n",
-                "done\n",
-                "printf '   hello world   \\n' > \"$out\"\n",
-            ),
-        );
-        let client =
-            build_codex_test_client(script, dir.path().join("runtime"), dir.path().to_path_buf());
-        let out = client
-            .complete("ignored", Some("fake-model"))
-            .expect("complete should succeed");
-        assert_eq!(out, "hello world");
-    }
-
-    #[test]
-    fn codex_client_complete_surfaces_subprocess_failure() {
-        use tempfile::tempdir;
-        let dir = tempdir().expect("tempdir");
-        let script = write_fake_codex(
-            dir.path(),
-            concat!(
-                "#!/bin/sh\n",
-                "cat >/dev/null\n",
-                "echo 'codex blew up' >&2\n",
-                "exit 7\n",
-            ),
-        );
-        let client =
-            build_codex_test_client(script, dir.path().join("runtime"), dir.path().to_path_buf());
-        let err = client
-            .complete("prompt", Some("fake-model"))
-            .expect_err("should fail when codex exits nonzero");
-        assert!(err.contains("codex exec failed"));
-        assert!(err.contains("codex blew up"));
-    }
-
-    #[test]
-    fn codex_client_complete_errors_on_empty_last_message() {
-        use tempfile::tempdir;
-        let dir = tempdir().expect("tempdir");
-        let script = write_fake_codex(
-            dir.path(),
-            concat!(
-                "#!/bin/sh\n",
-                "cat >/dev/null\n",
-                "out=\"\"\n",
-                "while [ \"$#\" -gt 0 ]; do\n",
-                "  if [ \"$1\" = \"--output-last-message\" ]; then\n",
-                "    out=\"$2\"; shift 2; continue\n",
-                "  fi\n",
-                "  shift\n",
-                "done\n",
-                "printf '   \\n' > \"$out\"\n",
-            ),
-        );
-        let client =
-            build_codex_test_client(script, dir.path().join("runtime"), dir.path().to_path_buf());
-        let err = client
-            .complete("prompt", Some("fake-model"))
-            .expect_err("blank message must fail");
-        assert!(err.contains("empty final message"));
-    }
-
     /// `/usr/bin/true` exits 0 regardless of args, so it stands in for any
     /// "command is available" probe (`<bin> --version` returning success).
     const ALWAYS_OK_BIN: &str = "/usr/bin/true";
@@ -1221,23 +909,17 @@ mod tests {
         }
     }
 
-    fn auto_detect_with_isolated_env(
-        api_key: Option<&str>,
-        claude_bin: &str,
-        codex_bin: &str,
-    ) -> ModelBackend {
+    fn auto_detect_with_isolated_env(api_key: Option<&str>, grok_bin: &str) -> ModelBackend {
         let _lock = lock_env();
-        let priors: [(&str, Option<String>); 3] = [
+        let priors: [(&str, Option<String>); 2] = [
             (
                 "OPENROUTER_API_KEY",
                 std::env::var("OPENROUTER_API_KEY").ok(),
             ),
-            ("CLAWGS_CLAUDE_BIN", std::env::var("CLAWGS_CLAUDE_BIN").ok()),
-            ("CLAWGS_CODEX_BIN", std::env::var("CLAWGS_CODEX_BIN").ok()),
+            ("CLAWGS_GROK_BIN", std::env::var("CLAWGS_GROK_BIN").ok()),
         ];
         override_env("OPENROUTER_API_KEY", api_key);
-        std::env::set_var("CLAWGS_CLAUDE_BIN", claude_bin);
-        std::env::set_var("CLAWGS_CODEX_BIN", codex_bin);
+        std::env::set_var("CLAWGS_GROK_BIN", grok_bin);
         let backend = super::auto_detect_model_backend();
         for (key, prior) in &priors {
             override_env(key, prior.as_deref());
@@ -1247,33 +929,19 @@ mod tests {
 
     #[test]
     fn auto_detect_prefers_openrouter_when_api_key_set() {
-        let backend = auto_detect_with_isolated_env(
-            Some("any-test-key"),
-            "/nonexistent/claude-zzz",
-            "/nonexistent/codex-zzz",
-        );
+        let backend = auto_detect_with_isolated_env(Some("any-test-key"), ALWAYS_OK_BIN);
         assert_eq!(backend, ModelBackend::OpenRouter);
     }
 
     #[test]
-    fn auto_detect_chooses_claude_when_only_claude_runnable() {
-        let backend = auto_detect_with_isolated_env(None, ALWAYS_OK_BIN, "/nonexistent/codex-zzz");
-        assert_eq!(backend, ModelBackend::ClaudeCli);
-    }
-
-    #[test]
-    fn auto_detect_chooses_codex_when_only_codex_runnable() {
-        let backend = auto_detect_with_isolated_env(None, "/nonexistent/claude-zzz", ALWAYS_OK_BIN);
-        assert_eq!(backend, ModelBackend::CodexCli);
+    fn auto_detect_chooses_grok_when_grok_is_runnable() {
+        let backend = auto_detect_with_isolated_env(None, ALWAYS_OK_BIN);
+        assert_eq!(backend, ModelBackend::GrokCli);
     }
 
     #[test]
     fn auto_detect_falls_back_to_openrouter_when_nothing_available() {
-        let backend = auto_detect_with_isolated_env(
-            None,
-            "/nonexistent/claude-zzz",
-            "/nonexistent/codex-zzz",
-        );
+        let backend = auto_detect_with_isolated_env(None, "/nonexistent/grok-zzz");
         assert_eq!(backend, ModelBackend::OpenRouter);
     }
 
@@ -1291,54 +959,65 @@ mod tests {
     }
 
     #[test]
-    fn validate_backend_credentials_accepts_runnable_claude_binary() {
+    fn validate_backend_credentials_accepts_runnable_grok_binary() {
         let _lock = lock_env();
-        let prior = std::env::var("CLAWGS_CLAUDE_BIN").ok();
-        std::env::set_var("CLAWGS_CLAUDE_BIN", ALWAYS_OK_BIN);
-        validate_backend_credentials(ModelBackend::ClaudeCli)
-            .expect("runnable claude bin should validate");
+        let prior = std::env::var("CLAWGS_GROK_BIN").ok();
+        std::env::set_var("CLAWGS_GROK_BIN", ALWAYS_OK_BIN);
+        validate_backend_credentials(ModelBackend::GrokCli)
+            .expect("runnable grok bin should validate");
         match prior {
-            Some(value) => std::env::set_var("CLAWGS_CLAUDE_BIN", value),
-            None => std::env::remove_var("CLAWGS_CLAUDE_BIN"),
+            Some(value) => std::env::set_var("CLAWGS_GROK_BIN", value),
+            None => std::env::remove_var("CLAWGS_GROK_BIN"),
         }
     }
 
     #[test]
-    fn validate_backend_credentials_accepts_runnable_codex_binary() {
+    fn grok_cli_client_new_uses_defaults_when_env_unset() {
         let _lock = lock_env();
-        let prior = std::env::var("CLAWGS_CODEX_BIN").ok();
-        std::env::set_var("CLAWGS_CODEX_BIN", ALWAYS_OK_BIN);
-        validate_backend_credentials(ModelBackend::CodexCli)
-            .expect("runnable codex bin should validate");
-        match prior {
-            Some(value) => std::env::set_var("CLAWGS_CODEX_BIN", value),
-            None => std::env::remove_var("CLAWGS_CODEX_BIN"),
-        }
+        std::env::remove_var("CLAWGS_GROK_BIN");
+        std::env::remove_var("CLAWGS_GROK_WORKDIR");
+        std::env::remove_var("CLAWGS_GROK_MAX_TURNS");
+        let client = GrokCliModelClient::new();
+        assert_eq!(client.bin, "grok");
+        assert_eq!(client.max_turns, "20");
+        assert!(client.runtime_dir.ends_with("clawgs-grok-headless"));
     }
 
     #[test]
-    fn codex_cli_client_new_uses_defaults_when_env_unset() {
-        let _lock = lock_env();
-        std::env::remove_var("CLAWGS_CODEX_BIN");
-        std::env::remove_var("CLAWGS_CODEX_REASONING_EFFORT");
-        std::env::remove_var("CLAWGS_CODEX_VERBOSITY");
-        std::env::remove_var("CLAWGS_CODEX_WORKDIR");
-        let client = CodexCliModelClient::new();
-        assert_eq!(client.bin, "codex");
-        assert_eq!(client.reasoning_effort, "low");
-        assert_eq!(client.verbosity, "low");
-        assert!(client.runtime_dir.ends_with("clawgs-codex-exec"));
-    }
+    fn grok_client_complete_reads_prompt_file_and_returns_trimmed_stdout() {
+        use tempfile::tempdir;
+        let dir = tempdir().expect("tempdir");
+        let script = write_fake_backend(
+            dir.path(),
+            concat!(
+                "#!/bin/sh\n",
+                "prompt=\"\"\n",
+                "model=\"\"\n",
+                "while [ \"$#\" -gt 0 ]; do\n",
+                "  case \"$1\" in\n",
+                "    --prompt-file) prompt=\"$2\"; shift 2;;\n",
+                "    -m) model=\"$2\"; shift 2;;\n",
+                "    *) shift;;\n",
+                "  esac\n",
+                "done\n",
+                "test -f \"$prompt\" || exit 3\n",
+                "grep -q 'status prompt' \"$prompt\" || exit 4\n",
+                "test \"$model\" = 'grok-test-model' || exit 5\n",
+                "printf '   grok ok   \\n'\n",
+            ),
+        );
+        let client = GrokCliModelClient {
+            bin: script.to_string_lossy().into_owned(),
+            runtime_dir: dir.path().join("runtime"),
+            workdir: dir.path().to_path_buf(),
+            max_turns: "7".to_string(),
+        };
 
-    #[test]
-    fn claude_cli_client_new_uses_defaults_when_env_unset() {
-        let _lock = lock_env();
-        std::env::remove_var("CLAWGS_CLAUDE_BIN");
-        std::env::remove_var("CLAWGS_CLAUDE_MAX_BUDGET");
-        let client = ClaudeCliModelClient::new();
-        assert_eq!(client.bin, "claude");
-        assert_eq!(client.max_budget, "0.02");
-        assert!(client.runtime_dir.ends_with("clawgs-claude-exec"));
+        let out = client
+            .complete("status prompt", Some("grok-test-model"))
+            .expect("complete should succeed");
+
+        assert_eq!(out, "grok ok");
     }
 
     #[test]

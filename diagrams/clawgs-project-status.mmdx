@@ -1,0 +1,98 @@
+<!-- mmdx
+{
+  "entry": "main",
+  "shortLink": { "username": "buildooor", "slug": "clawgs-project-status" },
+  "links": [
+    { "from": "main", "label": "Open proof status", "to": "proof-status", "title": "Open clawgs proof status" },
+    { "from": "main", "label": "Open primary flows", "to": "primary-flows", "title": "Open clawgs primary flows" },
+    { "from": "main", "label": "Open next move", "to": "next-move", "title": "Open clawgs next move" }
+  ]
+}
+-->
+
+## chart main Clawgs Project Status Crux
+```mermaid
+flowchart LR
+  vision["clawgs: stable JSON snapshots and live emit protocol"]:::gray
+  tests["GREEN cargo test passed all suites"]:::green
+  install["YELLOW clean crates.io install proof: clawgs-portfolio-reality-idea-plan-v6n.7"]:::yellow
+  downstream["YELLOW swimmers contract drift smoke: clawgs-portfolio-reality-idea-plan-v6n.8"]:::yellow
+  perf["YELLOW transcript and tmux profiling: clawgs-portfolio-reality-idea-plan-v6n.9"]:::yellow
+  vision --> tests --> install --> downstream
+  tests --> perf
+  classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
+  classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+  classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
+```
+
+## chart epic-gantt Clawgs Epic Status
+```mermaid
+gantt
+  title clawgs status as of 2026-05-28
+  dateFormat YYYY-MM-DD
+  section GREEN Proven
+  GREEN cargo test passed parser emit schema demos :done, 2026-05-28, 1d
+  section YELLOW Planned
+  YELLOW publish status v6n.6 :active, 2026-05-28, 1d
+  YELLOW clean install proof v6n.7 :active, 2026-05-29, 1d
+  YELLOW swimmers drift smoke v6n.8 :active, 2026-05-30, 1d
+  YELLOW profiling and cue refactor v6n.9 v6n.10 :active, 2026-05-31, 2d
+```
+
+## chart epic-map Clawgs Dependency Map
+```mermaid
+flowchart TD
+  extract["GREEN Claude and Codex extract contracts"]:::green
+  emit["GREEN emit protocol and stdio tests"]:::green
+  schema["GREEN schema sync and golden tests"]:::green
+  install["YELLOW clean install demo proof v6n.7"]:::yellow
+  swim["YELLOW downstream swimmers smoke depends on install v6n.8"]:::yellow
+  perf["YELLOW large transcript tmux baseline v6n.9"]:::yellow
+  refactor["YELLOW action-cue refactor v6n.10"]:::yellow
+  extract --> schema --> install --> swim
+  emit --> install
+  schema --> perf --> refactor
+  classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
+  classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+```
+
+## chart primary-flows Clawgs Primary Flows
+```mermaid
+flowchart TD
+  operator["Agent operator or tool author"]:::gray
+  logs["GREEN discover Claude Codex logs"]:::green
+  extract["GREEN normalize to clawgs v2 JSON"]:::green
+  emit["GREEN emit live NDJSON protocol"]:::green
+  downstream["YELLOW prove swimmers consumption v6n.8"]:::yellow
+  operator --> logs --> extract --> emit --> downstream
+  classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
+  classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+  classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
+```
+
+## chart proof-status Clawgs Proof Status
+```mermaid
+flowchart TD
+  read["GREEN README and VISION read"]:::green
+  tests["GREEN cargo test passed all reported suites"]:::green
+  install["YELLOW cargo install clean-machine proof not run v6n.7"]:::yellow
+  downstream["YELLOW swimmers contract smoke not run v6n.8"]:::yellow
+  perf["YELLOW no large corpus profile v6n.9"]:::yellow
+  read --> tests --> install --> downstream --> perf
+  classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
+  classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+```
+
+## chart next-move Clawgs Next Move
+```mermaid
+flowchart TD
+  rank["Power-map: customer is tool author needing stable agent-session state contract"]:::gray
+  one["1 clean install demo proof v6n.7"]:::yellow
+  two["2 downstream swimmers contract smoke v6n.8"]:::yellow
+  three["3 profile large transcript and tmux scan v6n.9"]:::yellow
+  four["4 refactor action-cue protocol handling v6n.10"]:::yellow
+  rank --> one --> two --> three --> four
+  classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+  classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
+```
+

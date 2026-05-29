@@ -1,6 +1,7 @@
 target/
 .DS_Store
 lcov.info
+*.profraw
 .ubs/
 *.bak
 *.orig

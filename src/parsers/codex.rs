@@ -186,7 +186,9 @@ fn user_event_message_text(payload: &Value) -> Option<String> {
 }
 
 fn internal_warning_text(text: &str) -> bool {
-    text.trim_start().starts_with("Warning:")
+    const APPLY_PATCH_EXEC_WARNING: &str =
+        "Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.";
+    text.trim_start().starts_with(APPLY_PATCH_EXEC_WARNING)
 }
 
 fn update_awaiting_user_state(
@@ -1106,6 +1108,27 @@ mod tests {
         let snapshot = parse(file.path(), &ExtractOptions::default()).expect("parse");
 
         assert_eq!(snapshot.user_task.as_deref(), Some("Use the fallback task"));
+    }
+
+    #[test]
+    fn parse_codex_preserves_user_warning_prompts_except_known_harness_warning() {
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            concat!(
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Initial task\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Warning: do not run destructive commands.\"}]}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.\"}]}}\n"
+            ),
+        )
+        .expect("write fixture");
+
+        let snapshot = parse(file.path(), &ExtractOptions::default()).expect("parse");
+
+        assert_eq!(
+            snapshot.user_task.as_deref(),
+            Some("Warning: do not run destructive commands.")
+        );
     }
 
     #[test]

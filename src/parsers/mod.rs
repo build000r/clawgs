@@ -5,6 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use chrono::DateTime;
 use serde_json::Value;
 
 use crate::{Action, CommitSignal, ExtractOptions};
@@ -137,14 +138,6 @@ pub(crate) fn extract_timestamp(entry: &Value) -> Option<String> {
     timestamp_from_value(entry).or_else(|| entry.get("payload").and_then(timestamp_from_value))
 }
 
-fn scalar_to_string(value: &Value) -> Option<String> {
-    match value {
-        Value::String(value) => Some(value.clone()),
-        Value::Number(_) | Value::Bool(_) => Some(value.to_string()),
-        _ => None,
-    }
-}
-
 fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
@@ -156,7 +149,14 @@ fn string_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
 fn timestamp_from_value(value: &Value) -> Option<String> {
     ["timestamp", "created_at", "time", "ts"]
         .into_iter()
-        .find_map(|key| value.get(key).and_then(scalar_to_string))
+        .find_map(|key| value.get(key).and_then(date_time_string))
+}
+
+fn date_time_string(value: &Value) -> Option<String> {
+    let value = value.as_str()?;
+    DateTime::parse_from_rfc3339(value)
+        .is_ok()
+        .then(|| value.to_string())
 }
 
 #[cfg(test)]
@@ -206,11 +206,28 @@ mod tests {
     }
 
     #[test]
-    fn extract_timestamp_uses_entry_then_payload_scalars() {
-        let top_level = serde_json::json!({"timestamp": 12345});
-        let payload = serde_json::json!({"payload": {"created_at": true}});
+    fn extract_timestamp_uses_entry_then_payload_date_time_strings() {
+        let top_level = serde_json::json!({"timestamp": "2026-02-26T20:11:56Z"});
+        let payload = serde_json::json!({"payload": {"created_at": "2026-02-26T20:12:56Z"}});
 
-        assert_eq!(extract_timestamp(&top_level).as_deref(), Some("12345"));
-        assert_eq!(extract_timestamp(&payload).as_deref(), Some("true"));
+        assert_eq!(
+            extract_timestamp(&top_level).as_deref(),
+            Some("2026-02-26T20:11:56Z")
+        );
+        assert_eq!(
+            extract_timestamp(&payload).as_deref(),
+            Some("2026-02-26T20:12:56Z")
+        );
+    }
+
+    #[test]
+    fn extract_timestamp_rejects_non_date_time_values() {
+        let numeric = serde_json::json!({"timestamp": 12345});
+        let boolean = serde_json::json!({"payload": {"created_at": true}});
+        let plain_text = serde_json::json!({"ts": "yesterday"});
+
+        assert_eq!(extract_timestamp(&numeric), None);
+        assert_eq!(extract_timestamp(&boolean), None);
+        assert_eq!(extract_timestamp(&plain_text), None);
     }
 }

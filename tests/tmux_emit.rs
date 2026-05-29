@@ -209,6 +209,31 @@ fn tmux_notify_triggers_immediate_rescan() {
 }
 
 #[test]
+fn tmux_notify_reports_absent_daemon() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let socket_path = temp_dir.path().join("missing.sock");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_clawgs"))
+        .arg("tmux-notify")
+        .arg("--socket")
+        .arg(&socket_path)
+        .arg("--event")
+        .arg("session-created")
+        .output()
+        .expect("run tmux notify");
+
+    assert!(
+        !output.status.success(),
+        "tmux-notify should fail without daemon"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("failed to notify tmux daemon"),
+        "stderr should explain failed notification: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn claude_hook_notify_sends_compact_event_to_socket() {
     let temp_dir = TempDir::new().expect("temp dir");
     let socket_path = temp_dir.path().join("hook.sock");

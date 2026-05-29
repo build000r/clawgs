@@ -19,6 +19,8 @@ use clawgs::tmux::TmuxScanTracker;
 use clawgs::{extract, resolve_input, AgentTool, ExtractOptions, ToolSelection};
 
 const MAX_TMUX_INTERVAL_MS: u64 = 24 * 60 * 60 * 1000;
+const TMUX_SOCKET_PROBE_ATTEMPTS: usize = 3;
+const TMUX_SOCKET_PROBE_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Parser)]
 #[command(name = "clawgs")]
@@ -586,7 +588,7 @@ fn write_json_line<W: Write, T: Serialize>(writer: &mut W, value: &T) -> Result<
 
 fn run_tmux_notify(args: TmuxNotifyArgs) -> Result<()> {
     let socket_path = args.socket.unwrap_or_else(default_tmux_socket_path);
-    send_notify_datagram(&socket_path, args.event.as_bytes())?;
+    send_notify_datagram_strict(&socket_path, args.event.as_bytes())?;
     Ok(())
 }
 
@@ -596,13 +598,21 @@ fn run_claude_hook_notify(args: ClaudeHookNotifyArgs) -> Result<()> {
     let mut raw = String::new();
     let _ = stdin.read_to_string(&mut raw);
     let event = claude_hook_event_tag(&raw);
-    send_notify_datagram(&socket_path, event.as_bytes())?;
+    send_notify_datagram_best_effort(&socket_path, event.as_bytes())?;
     Ok(())
 }
 
-fn send_notify_datagram(socket_path: &PathBuf, payload: &[u8]) -> Result<()> {
+fn send_notify_datagram_strict(socket_path: &PathBuf, payload: &[u8]) -> Result<()> {
     let sender = UnixDatagram::unbound().context("failed to create tmux notify socket")?;
-    // Hooks should be safe to install even before the daemon is running.
+    sender
+        .send_to(payload, socket_path)
+        .with_context(|| format!("failed to notify tmux daemon at {}", socket_path.display()))?;
+    Ok(())
+}
+
+fn send_notify_datagram_best_effort(socket_path: &PathBuf, payload: &[u8]) -> Result<()> {
+    let sender = UnixDatagram::unbound().context("failed to create tmux notify socket")?;
+    // Claude hooks should be safe to install even before the daemon is running.
     let _ = sender.send_to(payload, socket_path);
     Ok(())
 }
@@ -732,12 +742,35 @@ fn remove_existing_socket(path: &PathBuf) -> Result<()> {
         );
     }
 
+    if unix_socket_has_listener(path) {
+        anyhow::bail!(
+            "tmux notify socket is already in use; refusing to replace active daemon socket: {}",
+            path.display()
+        );
+    }
+
     std::fs::remove_file(path).with_context(|| {
         format!(
             "failed to remove existing tmux socket at {}",
             path.display()
         )
     })
+}
+
+fn unix_socket_has_listener(path: &PathBuf) -> bool {
+    for attempt in 0..TMUX_SOCKET_PROBE_ATTEMPTS {
+        if UnixDatagram::unbound()
+            .and_then(|sender| sender.send_to(b"clawgs-probe", path))
+            .is_err()
+        {
+            return false;
+        }
+        if attempt + 1 < TMUX_SOCKET_PROBE_ATTEMPTS {
+            std::thread::sleep(TMUX_SOCKET_PROBE_RETRY_DELAY);
+        }
+    }
+
+    true
 }
 
 fn path_is_unix_socket(path: &PathBuf) -> bool {
@@ -900,6 +933,21 @@ mod tests {
         assert!(socket_path.exists());
         drop(guard);
         assert!(!socket_path.exists());
+    }
+
+    #[test]
+    fn bind_tmux_socket_refuses_active_socket() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("notify.sock");
+        let _active = UnixDatagram::bind(&socket_path).expect("bind active socket");
+
+        let error = bind_tmux_socket(&socket_path).expect_err("active socket should be refused");
+
+        assert!(error.to_string().contains("already in use"));
+        assert!(
+            path_is_unix_socket(&socket_path),
+            "active daemon socket must not be unlinked"
+        );
     }
 
     #[test]

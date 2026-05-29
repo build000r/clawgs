@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "clawgs claude-hook-notify"
+            "command": "clawgs claude-hook-notify --socket \"$HOME/.tmux/clawgs-tmux.sock\""
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "clawgs claude-hook-notify"
+            "command": "clawgs claude-hook-notify --socket \"$HOME/.tmux/clawgs-tmux.sock\""
           }
         ]
       }
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "clawgs claude-hook-notify"
+            "command": "clawgs claude-hook-notify --socket \"$HOME/.tmux/clawgs-tmux.sock\""
           }
         ]
       }

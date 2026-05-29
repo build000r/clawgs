@@ -285,6 +285,12 @@ impl<'de> Deserialize<'de> for SyncRequest {
         D: Deserializer<'de>,
     {
         let wire = SyncRequestWire::deserialize(deserializer)?;
+        if wire.message_type != SYNC_MESSAGE_TYPE {
+            return Err(serde::de::Error::custom(format!(
+                "expected sync request type {SYNC_MESSAGE_TYPE:?}, got {:?}",
+                wire.message_type
+            )));
+        }
         Ok(Self {
             id: wire.id,
             now: wire.now,
@@ -296,8 +302,8 @@ impl<'de> Deserialize<'de> for SyncRequest {
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 struct SyncRequestWire {
-    #[serde(default = "default_sync_message_type", rename = "type")]
-    _message_type: String,
+    #[serde(rename = "type")]
+    message_type: String,
     id: String,
     now: DateTime<Utc>,
     config: SyncRequestConfigWire,
@@ -586,7 +592,7 @@ pub enum DaemonInboundMessage {
     Hello {
         protocol: String,
     },
-    #[serde(rename = "sync_result", alias = "sync_response", alias = "sync")]
+    #[serde(rename = "sync_result", alias = "sync_response")]
     SyncResponse {
         #[serde(
             rename = "id",
@@ -697,10 +703,6 @@ where
     D: Deserializer<'de>,
 {
     Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
-}
-
-fn default_sync_message_type() -> String {
-    SYNC_MESSAGE_TYPE.to_string()
 }
 
 const fn default_enabled() -> bool {
@@ -931,6 +933,45 @@ mod tests {
     }
 
     #[test]
+    fn sync_request_rejects_missing_or_wrong_message_type() {
+        let missing_type = serde_json::json!({
+            "id": "req-missing",
+            "now": "2026-02-26T21:00:00Z",
+            "config": {
+                "enabled": true,
+                "model": "",
+                "cadence_hot_ms": 15000,
+                "cadence_warm_ms": 45000,
+                "cadence_cold_ms": 120000
+            },
+            "sessions": []
+        })
+        .to_string();
+        assert!(
+            serde_json::from_str::<SyncRequest>(&missing_type).is_err(),
+            "type is required by clawgs.emit.v2"
+        );
+
+        let wrong_type = serde_json::json!({
+            "type": "sync_result",
+            "id": "req-wrong",
+            "now": "2026-02-26T21:00:00Z",
+            "config": {
+                "enabled": true,
+                "model": "",
+                "cadence_hot_ms": 15000,
+                "cadence_warm_ms": 45000,
+                "cadence_cold_ms": 120000
+            },
+            "sessions": []
+        })
+        .to_string();
+        let err =
+            serde_json::from_str::<SyncRequest>(&wrong_type).expect_err("wrong type must fail");
+        assert!(err.to_string().contains("expected sync request type"));
+    }
+
+    #[test]
     fn config_validation_rejects_unknown_backend() {
         let cfg = ThoughtConfig {
             backend: "gemini".to_string(),
@@ -1044,6 +1085,27 @@ mod tests {
             assert!(updates.is_empty());
             assert_eq!(SYNC_RESPONSE_MESSAGE_TYPE, "sync_result");
         }
+    }
+
+    #[test]
+    fn inbound_message_rejects_sync_request_envelope_as_response() {
+        let raw = r#"{
+            "type": "sync",
+            "id": "req-1",
+            "now": "2026-02-26T21:00:00Z",
+            "config": {
+                "enabled": true,
+                "model": "",
+                "cadence_hot_ms": 15000,
+                "cadence_warm_ms": 45000,
+                "cadence_cold_ms": 120000
+            },
+            "sessions": []
+        }"#;
+        assert!(
+            serde_json::from_str::<DaemonInboundMessage>(raw).is_err(),
+            "daemon output parser must not treat sync requests as responses"
+        );
     }
 
     #[test]

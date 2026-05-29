@@ -269,12 +269,19 @@ fn action_cue_schema_evidence_matches_runtime_rules() {
 #[test]
 fn claude_hook_reference_is_valid_and_targets_notify_command() {
     let snippet = load_json(include_str!("../references/claude-code-hooks.json"));
+    let expected_command = "clawgs claude-hook-notify --socket \"$HOME/.tmux/clawgs-tmux.sock\"";
     for event in ["Notification", "PostToolUse", "Stop"] {
         assert_eq!(
-            snippet["hooks"][event][0]["hooks"][0]["command"], "clawgs claude-hook-notify",
+            snippet["hooks"][event][0]["hooks"][0]["command"], expected_command,
             "hook snippet command drifted for {event}"
         );
     }
+
+    let tmux_config = include_str!("../references/tmux-clawgs.conf");
+    assert!(
+        tmux_config.contains("--socket \"$HOME/.tmux/clawgs-tmux.sock\""),
+        "tmux daemon snippet must use the same socket as Claude hook snippet"
+    );
 }
 
 #[test]

@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const OPENROUTER_TIMEOUT: Duration = Duration::from_secs(15);
 const OPENROUTER_CHAT_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+const COMMAND_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const GROK_CLI_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/free";
 const DEFAULT_GROK_CLI_MODEL: &str = "";
@@ -180,11 +181,15 @@ impl Default for GrokCliModelClient {
 
 impl ModelClient for GrokCliModelClient {
     fn complete(&self, prompt: &str, model_override: Option<&str>) -> Result<String, String> {
-        let model = candidate_models(model_override, ModelBackend::GrokCli)
-            .into_iter()
-            .next()
-            .unwrap_or_default();
+        complete_with_models(
+            &candidate_models(model_override, ModelBackend::GrokCli),
+            |model| self.complete_once(prompt, model),
+        )
+    }
+}
 
+impl GrokCliModelClient {
+    fn complete_once(&self, prompt: &str, model: &str) -> Result<String, String> {
         fs::create_dir_all(&self.runtime_dir)
             .map_err(|error| format!("failed to create {}: {error}", self.runtime_dir.display()))?;
 
@@ -203,7 +208,7 @@ impl ModelClient for GrokCliModelClient {
 
         let output = run_subprocess_capturing(SubprocessSpec {
             bin: &self.bin,
-            args: build_grok_headless_args(&model, &prompt_path, &self.workdir, &self.max_turns),
+            args: build_grok_headless_args(model, &prompt_path, &self.workdir, &self.max_turns),
             stdin_payload: &[],
             stdout_path: &stdout_path,
             stderr_path: &stderr_path,
@@ -237,10 +242,23 @@ fn auto_detect_model_backend() -> ModelBackend {
 }
 
 fn command_available(env_key: &str, default: &str) -> bool {
-    Command::new(configured_bin(env_key, default))
+    command_available_with_timeout(env_key, default, COMMAND_PROBE_TIMEOUT)
+}
+
+fn command_available_with_timeout(env_key: &str, default: &str, timeout: Duration) -> bool {
+    let mut child = match Command::new(configured_bin(env_key, default))
         .arg("--version")
-        .output()
-        .map(|output| output.status.success())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+
+    wait_with_timeout(&mut child, timeout, "model backend version probe")
+        .map(|status| status.success())
         .unwrap_or(false)
 }
 
@@ -293,7 +311,6 @@ fn build_grok_headless_args(
         prompt_path.as_os_str().to_os_string(),
         OsString::from("--output-format"),
         OsString::from("plain"),
-        OsString::from("--always-approve"),
         OsString::from("--no-alt-screen"),
         OsString::from("--max-turns"),
         OsString::from(max_turns),
@@ -562,11 +579,11 @@ mod tests {
     }
 
     use super::{
-        build_grok_headless_args, build_openrouter_request_body, default_model_for_backend,
-        extract_openrouter_content, failure_preview, interpret_openrouter_response,
-        pick_nonempty_or_fallback, run_subprocess_capturing, thought_models,
-        validate_backend_credentials, GrokCliModelClient, ModelBackend, ModelClient,
-        OpenRouterModelClient, SubprocessSpec,
+        build_grok_headless_args, build_openrouter_request_body, command_available_with_timeout,
+        default_model_for_backend, extract_openrouter_content, failure_preview,
+        interpret_openrouter_response, pick_nonempty_or_fallback, run_subprocess_capturing,
+        thought_models, validate_backend_credentials, GrokCliModelClient, ModelBackend,
+        ModelClient, OpenRouterModelClient, SubprocessSpec,
     };
 
     #[test]
@@ -658,7 +675,10 @@ mod tests {
         assert!(args.contains(&"/tmp/prompt.txt".to_string()));
         assert!(args.contains(&"--output-format".to_string()));
         assert!(args.contains(&"plain".to_string()));
-        assert!(args.contains(&"--always-approve".to_string()));
+        assert!(
+            !args.contains(&"--always-approve".to_string()),
+            "status summarization must not auto-approve tool-capable CLI actions"
+        );
         assert!(args.contains(&"--max-turns".to_string()));
         assert!(args.contains(&"20".to_string()));
         assert!(args.contains(&"--cwd".to_string()));
@@ -896,6 +916,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn command_available_probe_times_out() {
+        use std::time::{Duration, Instant};
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("tempdir");
+        let script = write_fake_backend(dir.path(), concat!("#!/bin/sh\n", "sleep 30\n"));
+        let script_bin = script.to_string_lossy().into_owned();
+
+        let started = Instant::now();
+        let available = command_available_with_timeout(
+            "CLAWGS_TEST_GROK_BIN_UNUSED",
+            &script_bin,
+            Duration::from_millis(100),
+        );
+
+        assert!(!available);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "availability probe should not hang on a wedged backend"
+        );
+    }
+
     /// `/usr/bin/true` exits 0 regardless of args, so it stands in for any
     /// "command is available" probe (`<bin> --version` returning success).
     const ALWAYS_OK_BIN: &str = "/usr/bin/true";
@@ -1018,6 +1061,50 @@ mod tests {
             .expect("complete should succeed");
 
         assert_eq!(out, "grok ok");
+    }
+
+    #[test]
+    fn grok_client_complete_tries_configured_model_fallbacks() {
+        let _lock = lock_env();
+        use tempfile::tempdir;
+
+        std::env::set_var("SWIMMERS_THOUGHT_MODEL", "bad-model");
+        std::env::set_var("SWIMMERS_THOUGHT_MODEL_2", "good-model");
+        std::env::remove_var("SWIMMERS_THOUGHT_MODEL_3");
+
+        let dir = tempdir().expect("tempdir");
+        let script = write_fake_backend(
+            dir.path(),
+            concat!(
+                "#!/bin/sh\n",
+                "model=''\n",
+                "while [ \"$#\" -gt 0 ]; do\n",
+                "  case \"$1\" in\n",
+                "    -m) model=\"$2\"; shift 2;;\n",
+                "    *) shift;;\n",
+                "  esac\n",
+                "done\n",
+                "if [ \"$model\" = 'bad-model' ]; then\n",
+                "  echo 'bad model failed' >&2\n",
+                "  exit 7\n",
+                "fi\n",
+                "test \"$model\" = 'good-model' || exit 8\n",
+                "printf 'fallback ok\\n'\n",
+            ),
+        );
+        let client = GrokCliModelClient {
+            bin: script.to_string_lossy().into_owned(),
+            runtime_dir: dir.path().join("runtime"),
+            workdir: dir.path().to_path_buf(),
+            max_turns: "7".to_string(),
+        };
+
+        let out = client
+            .complete("status prompt", None)
+            .expect("fallback should succeed");
+
+        assert_eq!(out, "fallback ok");
+        clear_swimmers_env();
     }
 
     #[test]

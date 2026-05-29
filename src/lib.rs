@@ -634,27 +634,42 @@ fn codex_rollout_files(day: &Path) -> Vec<PathBuf> {
     rollout_files
 }
 
+const DISCOVERY_VALID_JSON_SCAN_LIMIT: usize = 64;
+const DISCOVERY_PHYSICAL_LINE_SCAN_LIMIT: usize = 4096;
+
 fn reader_matches_or_lacks_cwd<R: BufRead>(reader: R, cwd_str: &str) -> bool {
     let mut saw_valid_json = false;
     let mut saw_cwd = false;
+    let mut valid_json_lines = 0usize;
+    let mut hit_physical_line_limit = false;
 
-    for value in reader
-        .lines()
-        .take(64)
-        .filter_map(|line| line.ok())
-        .filter_map(|line| parsed_line_value(&line))
-    {
-        saw_valid_json = true;
-        let Some(entry_cwd) = value.get("cwd").and_then(Value::as_str) else {
+    for (physical_line_index, line) in reader.lines().enumerate() {
+        if physical_line_index >= DISCOVERY_PHYSICAL_LINE_SCAN_LIMIT {
+            hit_physical_line_limit = true;
+            break;
+        }
+
+        let Ok(line) = line else {
+            break;
+        };
+        let Some(value) = parsed_line_value(&line) else {
             continue;
         };
-        saw_cwd = true;
-        if entry_cwd == cwd_str {
-            return true;
+
+        saw_valid_json = true;
+        valid_json_lines += 1;
+        if let Some(entry_cwd) = value.get("cwd").and_then(Value::as_str) {
+            saw_cwd = true;
+            if entry_cwd == cwd_str {
+                return true;
+            }
+        }
+        if valid_json_lines >= DISCOVERY_VALID_JSON_SCAN_LIMIT {
+            break;
         }
     }
 
-    saw_valid_json && !saw_cwd
+    saw_valid_json && !saw_cwd && !hit_physical_line_limit
 }
 
 #[cfg(test)]
@@ -800,6 +815,41 @@ mod tests {
         .expect("write");
         let dir = tempfile::tempdir().expect("tempdir");
         assert!(claude_file_matches_cwd(file.path(), dir.path()));
+    }
+
+    #[test]
+    fn claude_discovery_counts_parseable_jsonl_lines_not_physical_lines() {
+        let cwd = PathBuf::from("/tmp/target-project");
+        let other_cwd = PathBuf::from("/tmp/other-project");
+        let file = NamedTempFile::new().expect("temp file");
+        let mut lines =
+            vec!["{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\"}}".to_string()];
+        lines.extend((0..70).map(|_| "not-json".to_string()));
+        lines.push(format!(
+            "{{\"type\":\"user\",\"cwd\":\"{}\",\"message\":{{\"role\":\"user\",\"content\":\"wrong\"}}}}",
+            other_cwd.display()
+        ));
+        fs::write(file.path(), format!("{}\n", lines.join("\n"))).expect("write");
+
+        assert!(
+            !claude_file_matches_cwd(file.path(), &cwd),
+            "mismatched cwd evidence must count even when malformed lines precede it"
+        );
+    }
+
+    #[test]
+    fn claude_discovery_does_not_fallback_after_physical_line_cap() {
+        let cwd = PathBuf::from("/tmp/target-project");
+        let file = NamedTempFile::new().expect("temp file");
+        let mut lines =
+            vec!["{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\"}}".to_string()];
+        lines.extend((0..DISCOVERY_PHYSICAL_LINE_SCAN_LIMIT).map(|_| "not-json".to_string()));
+        fs::write(file.path(), format!("{}\n", lines.join("\n"))).expect("write");
+
+        assert!(
+            !claude_file_matches_cwd(file.path(), &cwd),
+            "legacy no-cwd fallback needs bounded evidence before the physical line cap"
+        );
     }
 
     #[test]

@@ -4,7 +4,9 @@ use std::path::Path;
 use anyhow::Result;
 use serde_json::Value;
 
-use super::{extract_timestamp, push_action, read_jsonl, truncate, ParseSnapshot};
+use super::{
+    extract_timestamp, is_harness_markup, push_action, read_jsonl, truncate, ParseSnapshot,
+};
 use crate::{Action, CommitSignal, ExtractOptions};
 
 struct ToolCallObservation {
@@ -145,33 +147,6 @@ fn user_response_item_text(payload: &Value) -> Option<String> {
         .filter(|role| *role == "user")
         .and_then(|_| extract_user_input_text(payload))
         .filter(|text| text.chars().count() < 1000 && !is_harness_markup(text))
-}
-
-/// Returns true when `text` opens with a known harness-injected wrapper
-/// (system-reminder, command-name, bash-input, etc.) — these are not real
-/// user content and shouldn't be surfaced as the user task. Plain user input
-/// that happens to begin with `<html>`, `<template>`, or other XML-ish syntax
-/// is preserved.
-fn is_harness_markup(text: &str) -> bool {
-    const HARNESS_PREFIXES: &[&str] = &[
-        "<system-reminder",
-        "<system>",
-        "<command-name",
-        "<command-message",
-        "<command-args",
-        "<command-stdout",
-        "<command-stderr",
-        "<bash-input",
-        "<bash-stdout",
-        "<bash-stderr",
-        "<local-command-stdout",
-        "<local-command-stderr",
-        "<user-prompt-submit-hook",
-    ];
-    let trimmed = text.trim_start();
-    HARNESS_PREFIXES
-        .iter()
-        .any(|prefix| trimmed.starts_with(prefix))
 }
 
 fn user_event_message_text(payload: &Value) -> Option<String> {

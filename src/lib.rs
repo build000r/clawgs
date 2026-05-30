@@ -368,7 +368,13 @@ pub fn infer_tool_from_file(path: &Path) -> Result<AgentTool> {
     let reader = std::io::BufReader::new(file);
 
     for line in reader.lines().take(40) {
-        let line = line?;
+        // Skip unreadable (e.g. non-UTF-8) lines rather than aborting the whole
+        // inference: a single bad line should not hide a valid tool marker on a
+        // later line, matching the tolerance of the discovery scan
+        // (`reader_matches_or_lacks_cwd`) and `parsed_line_value`.
+        let Ok(line) = line else {
+            continue;
+        };
         if let Some(tool) = parsed_line_value(&line).and_then(|value| infer_tool_from_entry(&value))
         {
             return Ok(tool);
@@ -433,7 +439,10 @@ pub fn discover_claude_paths(cwd: &Path) -> Vec<PathBuf> {
         Err(_) => return Vec::new(),
     };
 
-    files.sort_by(|a, b| b.1.cmp(&a.1));
+    // Newest mtime first; break mtime ties by path (descending) so same-second
+    // sessions resolve deterministically instead of in arbitrary readdir order,
+    // matching the path-based tiebreak Codex discovery already uses.
+    files.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
     files.into_iter().map(|(path, _)| path).collect()
 }
 
@@ -535,7 +544,13 @@ fn modified_or_epoch(path: &Path) -> SystemTime {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(PathBuf::from)
+    // An empty HOME ("") must fail discovery rather than resolve to a relative
+    // `.claude/projects/...` path under the process cwd, which would silently
+    // scan an unrelated location. Treat empty like unset.
+    std::env::var("HOME")
+        .ok()
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
 }
 
 fn parsed_line_value(line: &str) -> Option<Value> {
@@ -870,6 +885,77 @@ mod tests {
         if let Some(home) = original_home {
             std::env::set_var("HOME", home);
         }
+    }
+
+    #[test]
+    fn discover_auto_errors_when_home_is_empty() {
+        let _lock = crate::test_support::home_env_lock().lock().unwrap();
+        let original_home = std::env::var_os("HOME");
+        // An empty HOME must fail discovery, not resolve to a relative
+        // `.claude/projects/...` path scanned under the process cwd.
+        std::env::set_var("HOME", "");
+        let cwd = PathBuf::from("/tmp/empty-home-project");
+
+        let err = discover_auto(&cwd).expect_err("empty HOME should not discover transcripts");
+        assert!(
+            err.to_string()
+                .contains("no Claude or Codex transcript JSONL found"),
+            "got: {err}"
+        );
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn infer_tool_skips_unreadable_line_before_a_valid_marker() {
+        // Line 1 is valid JSON without a tool marker, line 2 is invalid UTF-8,
+        // and the identifying marker is on line 3. Inference must skip the bad
+        // line rather than abort with an io error.
+        let file = NamedTempFile::new().expect("temp file");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"{\"unrelated\":1}\n");
+        bytes.extend_from_slice(&[0xff, 0xfe, b'\n']);
+        bytes.extend_from_slice(b"{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\"}}\n");
+        fs::write(file.path(), bytes).expect("write file");
+
+        let tool = infer_tool_from_file(file.path()).expect("infer tool past the bad line");
+        assert_eq!(tool, AgentTool::Claude);
+    }
+
+    #[test]
+    fn claude_discovery_breaks_mtime_ties_deterministically_by_path() {
+        let _lock = crate::test_support::home_env_lock().lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = PathBuf::from("/tmp/mtime-tie-project");
+        let cwd_slug = cwd.display().to_string().replace('/', "-");
+        let project_dir = tmp.path().join(".claude").join("projects").join(cwd_slug);
+        fs::create_dir_all(&project_dir).expect("mkdir");
+
+        let line = format!(
+            "{{\"type\":\"assistant\",\"cwd\":\"{}\",\"message\":{{\"role\":\"assistant\"}}}}\n",
+            cwd.display()
+        );
+        let a = project_dir.join("session-a.jsonl");
+        let z = project_dir.join("session-z.jsonl");
+        fs::write(&a, &line).expect("write a");
+        fs::write(&z, &line).expect("write z");
+        // Force identical mtimes so only the path tiebreak distinguishes them.
+        let shared = fs::metadata(&a).expect("meta").modified().expect("mtime");
+        for path in [&a, &z] {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .and_then(|file| file.set_modified(shared))
+                .expect("pin mtime");
+        }
+        std::env::set_var("HOME", tmp.path());
+
+        // Descending path order wins ties, so "session-z" sorts ahead of
+        // "session-a" regardless of readdir order.
+        assert_eq!(discover_claude_path(&cwd), Some(z));
     }
 
     #[test]

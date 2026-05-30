@@ -23,7 +23,7 @@ The machine-validatable JSON Schema lives at `references/clawgs.v2.schema.json`.
 
 When `--input` is omitted, discovery is local and cwd-exact:
 
-- Claude Code: scan `$HOME/.claude/projects/<cwd-with-slashes-replaced-by-dashes>/*.jsonl`, inspect the first 64 parseable JSONL lines of each candidate, accept files with an exact top-level `cwd` match or no top-level `cwd` evidence, ignore malformed-only files, and choose the newest accepted candidate by mtime.
+- Claude Code: scan `$HOME/.claude/projects/<cwd-with-slashes-replaced-by-dashes>/*.jsonl`, inspect the first 64 parseable JSONL lines of each candidate, accept files with an exact top-level `cwd` match or no top-level `cwd` evidence, ignore malformed-only files, and choose the newest accepted candidate by mtime with descending path order as the deterministic tiebreaker.
 - Codex: scan numeric `$HOME/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` folders in reverse order, inspect only the first line of each rollout, require `type: "session_meta"` with an exact `payload.cwd` match, ignore malformed or non-matching first lines, and choose the first accepted candidate by reverse date/path order.
 - Exclusion fallback: live tmux scans pass already claimed transcript paths back into discovery so panes sharing a cwd can attach to the next matching session instead of the same file.
 - Missing `HOME`, missing log directories, stale paths, or no cwd match all fail discovery and should be handled by passing `--input <path>`.

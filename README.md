@@ -90,7 +90,8 @@ the transcript lives outside the default Claude/Codex locations.
 Claude Code discovery looks under
 `$HOME/.claude/projects/<cwd-with-slashes-replaced-by-dashes>/*.jsonl`, keeps
 JSONL files whose first 64 parseable lines either contain an exact top-level
-`cwd` match or no `cwd` field at all, and returns the newest remaining file. The
+`cwd` match or no `cwd` field at all, and returns the newest remaining file,
+with path order as the deterministic tiebreaker for identical mtimes. The
 no-`cwd` fallback keeps older Claude logs discoverable; files with no parseable
 JSONL lines are ignored.
 

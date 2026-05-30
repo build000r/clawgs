@@ -68,7 +68,12 @@ impl JsonlAccumulator {
     fn ingest(&mut self, line: &str) {
         match serde_json::from_str::<Value>(line) {
             Ok(value) => {
-                if self.include_raw {
+                // `raw_events` is contractually an array of event objects
+                // (clawgs.v2 schema). A valid-JSON-but-non-object line (a bare
+                // number/string/array) is not an event, so keep it out of
+                // `raw_events` to avoid emitting a schema-violating document;
+                // it still counts toward `events_seen` via `entries`.
+                if self.include_raw && value.is_object() {
                     push_raw_event(&mut self.raw_events, value.clone());
                 }
                 self.entries.push(value);
@@ -111,6 +116,34 @@ pub(crate) fn truncate(value: &str, max_chars: usize) -> String {
         None => value.to_string(),
         Some((cut, _)) => value[..cut].to_string(),
     }
+}
+
+/// Returns true when `text` opens with a known harness-injected wrapper
+/// (system-reminder, command-name, bash-input, etc.) — these are not real
+/// user content and shouldn't be surfaced as the user task. Plain user input
+/// that happens to begin with `<html>`, `<template>`, or other XML-ish syntax
+/// is preserved. Shared by both the Claude and Codex parsers so the two paths
+/// filter harness markup identically.
+pub(crate) fn is_harness_markup(text: &str) -> bool {
+    const HARNESS_PREFIXES: &[&str] = &[
+        "<system-reminder",
+        "<system>",
+        "<command-name",
+        "<command-message",
+        "<command-args",
+        "<command-stdout",
+        "<command-stderr",
+        "<bash-input",
+        "<bash-stdout",
+        "<bash-stderr",
+        "<local-command-stdout",
+        "<local-command-stderr",
+        "<user-prompt-submit-hook",
+    ];
+    let trimmed = text.trim_start();
+    HARNESS_PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
 }
 
 pub(crate) fn push_action(actions: &mut Vec<Action>, action: Action, max_actions: usize) {
@@ -176,6 +209,32 @@ mod tests {
         let parsed = read_jsonl(file.path(), false).expect("read jsonl");
         assert_eq!(parsed.entries.len(), 2);
         assert_eq!(parsed.malformed_lines_skipped, 1);
+    }
+
+    #[test]
+    fn read_jsonl_keeps_only_object_values_in_raw_events() {
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            "{\"type\":\"a\"}\n42\n[\"not\", \"an\", \"event\"]\n{\"type\":\"b\"}\n",
+        )
+        .expect("write");
+
+        let parsed = read_jsonl(file.path(), true).expect("read jsonl");
+        assert_eq!(
+            parsed.entries.len(),
+            4,
+            "valid non-object JSONL values still count as parsed input"
+        );
+        assert_eq!(parsed.malformed_lines_skipped, 0);
+        assert_eq!(
+            parsed.raw_events,
+            Some(vec![
+                serde_json::json!({"type": "a"}),
+                serde_json::json!({"type": "b"}),
+            ]),
+            "raw_events must remain schema-compliant event objects"
+        );
     }
 
     #[test]

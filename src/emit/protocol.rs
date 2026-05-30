@@ -1115,4 +1115,56 @@ mod tests {
         let decoded: HelloMessage = serde_json::from_str(&encoded).expect("hello should parse");
         assert_eq!(decoded, hello);
     }
+
+    #[test]
+    fn thoughtless_update_roundtrips_through_inbound_message() {
+        // The engine emits updates with no `thought` (clear/passive updates).
+        // Because `thought` is `skip_serializing_if = "Option::is_none"`, the
+        // serialized JSON omits the key entirely. A consumer parsing the
+        // daemon's stdout via `DaemonInboundMessage::SyncResponse` (whose
+        // `updates: Vec<SyncUpdate>`) must be able to deserialize that — i.e.
+        // `thought` must default to None when absent, matching the committed
+        // schema, which lists `thought` as not-required.
+        let now = Utc::now();
+        let update = SyncUpdate {
+            session_id: "sess-1".to_string(),
+            stream_instance_id: None,
+            emission_seq: Some(1),
+            thought: None,
+            token_count: 0,
+            context_limit: 0,
+            thought_state: ThoughtState::Holding,
+            thought_source: ThoughtSource::CarryForward,
+            objective_changed: false,
+            bubble_precedence: BubblePrecedence::ThoughtFirst,
+            at: now,
+            objective_fingerprint: None,
+            rest_state: RestState::Active,
+            commit_candidate: false,
+            action_cues: Vec::new(),
+            timing: None,
+            cues: None,
+        };
+        let encoded = serde_json::to_value(&update).expect("update should serialize");
+        assert!(
+            encoded.get("thought").is_none(),
+            "thoughtless update must omit the thought key"
+        );
+
+        let inbound = serde_json::json!({
+            "type": "sync_result",
+            "id": "req-1",
+            "updates": [encoded],
+        })
+        .to_string();
+        let parsed: DaemonInboundMessage = serde_json::from_str(&inbound)
+            .expect("daemon consumers must parse thoughtless updates");
+        match parsed {
+            DaemonInboundMessage::SyncResponse { updates, .. } => {
+                assert_eq!(updates.len(), 1);
+                assert!(updates[0].thought.is_none());
+            }
+            other => panic!("expected sync_result, got {other:?}"),
+        }
+    }
 }

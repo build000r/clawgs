@@ -4,7 +4,8 @@ use anyhow::Result;
 use serde_json::Value;
 
 use super::{
-    extract_timestamp, extract_tool_detail, push_action, read_jsonl, truncate, ParseSnapshot,
+    extract_timestamp, extract_tool_detail, is_harness_markup, push_action, read_jsonl, truncate,
+    ParseSnapshot,
 };
 use crate::{Action, ExtractOptions};
 
@@ -62,6 +63,10 @@ fn update_user_task(entry: &Value, options: &ExtractOptions, user_task: &mut Opt
         .then_some(message(entry))
         .flatten()
         .and_then(|message| extract_user_text(Some(message)))
+        // Claude Code injects harness wrappers (system-reminders, slash-command
+        // and hook output) as user-role text; those are not the human task, so
+        // filter them out exactly as the Codex parser does.
+        .filter(|text| !is_harness_markup(text))
         .map(|text| truncate(&text, options.max_task_chars))
     {
         *user_task = Some(text);
@@ -391,5 +396,46 @@ mod tests {
 
         let medium_ascii = serde_json::json!({"type": "text", "text": "Sorry, retrying"});
         assert!(text_action(&medium_ascii, &options, &ts).is_some());
+    }
+
+    #[test]
+    fn parse_claude_filters_harness_markup_from_user_task() {
+        // A real task followed by a later harness-injected user turn
+        // (system-reminder). The harness wrapper must not overwrite the genuine
+        // user task, matching the Codex parser's behavior.
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            concat!(
+                "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Summarize the failing tests\"}}\n",
+                "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"<system-reminder>keep going</system-reminder>\"}]}}\n"
+            ),
+        )
+        .expect("write fixture");
+
+        let snapshot = parse(file.path(), &ExtractOptions::default()).expect("parse");
+        assert_eq!(
+            snapshot.user_task.as_deref(),
+            Some("Summarize the failing tests"),
+            "harness markup must not overwrite the real user task"
+        );
+    }
+
+    #[test]
+    fn parse_claude_preserves_user_html_content() {
+        // Plain user input that happens to start with XML-ish syntax is not a
+        // harness wrapper and must be preserved as the task.
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"<div>why is this not centered?</div>\"}}\n",
+        )
+        .expect("write fixture");
+
+        let snapshot = parse(file.path(), &ExtractOptions::default()).expect("parse");
+        assert_eq!(
+            snapshot.user_task.as_deref(),
+            Some("<div>why is this not centered?</div>")
+        );
     }
 }

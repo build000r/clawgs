@@ -2938,7 +2938,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_rest_state_uses_10_30_60_thresholds() {
+    fn idle_rest_state_caps_idle_sessions_at_drowsy() {
         let now = Utc::now();
         let mut session = sample_session(now);
         session.state = SessionState::Idle;

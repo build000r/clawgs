@@ -1,0 +1,7 @@
+[2026-06-01T23:20:14Z] baseline run
+git: 010210326e19253ed1f0c88ecc5daba8f681ca0f
+profile: release-perf
+fingerprint: /Users/b/repos/opensource/clawgs/tests/artifacts/perf/fingerprint.json
+outputs: /Users/b/repos/opensource/clawgs/tests/artifacts/perf/profile-large-corpus-2026-06-01/emit-stdio-disabled/baseline.json, /Users/b/repos/opensource/clawgs/tests/artifacts/perf/profile-large-corpus-2026-06-01/emit-stdio-disabled/baseline.md
+commands:
+  - jq -c '.config.enabled=false' scripts/perf/fixtures/emit_stdio.ndjson | OPENROUTER_API_KEY=fake target/release-perf/clawgs emit --stdio >/dev/null

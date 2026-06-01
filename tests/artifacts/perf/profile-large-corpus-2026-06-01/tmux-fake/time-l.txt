@@ -1,0 +1,19 @@
+fake tmux scenario complete: panes=64 capture_lines=120 max_capture_lines=200
+        0.23 real         0.08 user         0.04 sys
+             9420800  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                5756  page reclaims
+                  90  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   2  signals received
+                 107  voluntary context switches
+                6398  involuntary context switches
+            67492694  instructions retired
+            29400503  cycles elapsed
+             2326840  peak memory footprint

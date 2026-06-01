@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-04-22T00:47:17Z",
+  "timestamp": "2026-06-01T23:18:51Z",
   "hostname": "bs-MacBook-Air.local",
   "profile": "release-perf",
   "cpu": {
@@ -22,7 +22,7 @@
   "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11) (Homebrew)",
   "cargo": "cargo 1.93.1 (Homebrew)",
   "git": {
-    "head": "cab500a887bb254141029a7379b74c33868601e8",
-    "status_short": " M Cargo.toml\n M src/emit/engine.rs\n M src/emit/model_client.rs\n M src/emit/protocol.rs\n M src/lib.rs\n M src/main.rs\n M src/parsers/claude.rs\n M src/parsers/codex.rs\n M src/parsers/mod.rs\n M src/tmux.rs\n M tests/cli_demo.rs\n M tests/tmux_emit.rs\n?? .claude/\n?? .ntm/\n?? scripts/perf/\n?? tests/artifacts/"
+    "head": "010210326e19253ed1f0c88ecc5daba8f681ca0f",
+    "status_short": " M .beads/issues.jsonl\n M .gitignore\n M AGENTS.md\n?? memory/\n?? scripts/perf/tmux_fake_scenario.sh"
   }
 }

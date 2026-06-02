@@ -96,13 +96,16 @@ pub struct ActionCue {
 }
 
 impl ActionCue {
-    fn active(kind: ActionCueKind, evidence: &[&str]) -> Self {
+    pub(crate) fn active(kind: ActionCueKind) -> Self {
         Self {
             kind,
             status: ActionCueStatus::Active,
             source: ActionCueSource::Transcript,
             confidence: ActionCueConfidence::Deterministic,
-            evidence: evidence.iter().map(|item| item.to_string()).collect(),
+            evidence: Self::expected_evidence(kind)
+                .iter()
+                .map(|item| item.to_string())
+                .collect(),
         }
     }
 
@@ -141,6 +144,20 @@ impl ActionCue {
 
     pub fn is_valid(&self) -> bool {
         self.has_expected_evidence()
+    }
+
+    pub(crate) fn valid_from(action_cues: &[Self]) -> Vec<Self> {
+        action_cues
+            .iter()
+            .filter(|cue| cue.is_valid())
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn contains_valid_kind(action_cues: &[Self], kind: ActionCueKind) -> bool {
+        action_cues
+            .iter()
+            .any(|cue| cue.kind == kind && cue.is_valid())
     }
 }
 
@@ -310,10 +327,7 @@ pub(crate) fn action_cues_for_snapshot(
     let mut cues = Vec::new();
 
     if awaiting_user_input {
-        cues.push(ActionCue::active(
-            ActionCueKind::AwaitingUser,
-            &["awaiting_user_input"],
-        ));
+        cues.push(ActionCue::active(ActionCueKind::AwaitingUser));
     }
 
     let Some(signal) = commit_signal else {
@@ -321,34 +335,11 @@ pub(crate) fn action_cues_for_snapshot(
     };
 
     if signal.candidate {
-        cues.push(ActionCue::active(
-            ActionCueKind::CommitReady,
-            &[
-                "edit_seen",
-                "validation_succeeded",
-                "dirty_tree_checked_after_latest_edit",
-                "commit_not_seen_after_latest_edit",
-            ],
-        ));
+        cues.push(ActionCue::active(ActionCueKind::CommitReady));
     } else if signal.edited && !signal.validated && !signal.commit_seen {
-        cues.push(ActionCue::active(
-            ActionCueKind::ValidationMissingAfterEdit,
-            &[
-                "edit_seen",
-                "fresh_validation_not_seen",
-                "commit_not_seen_after_latest_edit",
-            ],
-        ));
+        cues.push(ActionCue::active(ActionCueKind::ValidationMissingAfterEdit));
     } else if signal.edited && signal.validated && !signal.dirty_checked && !signal.commit_seen {
-        cues.push(ActionCue::active(
-            ActionCueKind::DirtyCheckMissing,
-            &[
-                "edit_seen",
-                "validation_succeeded",
-                "dirty_tree_check_not_seen_after_latest_edit",
-                "commit_not_seen_after_latest_edit",
-            ],
-        ));
+        cues.push(ActionCue::active(ActionCueKind::DirtyCheckMissing));
     }
 
     cues

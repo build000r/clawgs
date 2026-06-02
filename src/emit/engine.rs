@@ -96,18 +96,8 @@ fn compute_session_deltas(
         .collect();
     removed_ids.sort();
 
-    let mut deltas: Vec<SessionDelta> = removed_ids
-        .into_iter()
-        .map(|session_id| SessionDelta {
-            session_id,
-            kind: SessionDeltaKind::Removed,
-            state: None,
-            tool: None,
-            cwd: None,
-            changed_fields: Vec::new(),
-            transcript_ambiguous: false,
-        })
-        .collect();
+    let mut deltas: Vec<SessionDelta> =
+        removed_ids.into_iter().map(SessionDelta::removed).collect();
 
     for session in &request.sessions {
         let state = per_session
@@ -118,15 +108,12 @@ fn compute_session_deltas(
         let changed_fields = session_changed_fields(previous, &current);
         let kind = session_delta_kind(previous, session, &changed_fields);
 
-        deltas.push(SessionDelta {
-            session_id: session.session_id.clone(),
+        deltas.push(SessionDelta::observed(
+            session,
             kind,
-            state: Some(session.state),
-            tool: session.tool.clone(),
-            cwd: Some(session.cwd.clone()),
             changed_fields,
-            transcript_ambiguous: transcript_group_is_ambiguous(session, transcript_group_counts),
-        });
+            transcript_group_is_ambiguous(session, transcript_group_counts),
+        ));
         state.last_observed = Some(current);
     }
 
@@ -1377,7 +1364,10 @@ fn rest_state_for_session(
             RestState::Sleeping
         }
         _ if context_snapshot.is_none()
-            && valid_action_cues_contain(&session.action_cues, ActionCueKind::AwaitingUser) =>
+            && ActionCue::contains_valid_kind(
+                &session.action_cues,
+                ActionCueKind::AwaitingUser,
+            ) =>
         {
             RestState::Sleeping
         }
@@ -1403,7 +1393,7 @@ fn commit_candidate_for_context(
             .is_some_and(|signal| signal.candidate),
         None => {
             session.commit_candidate
-                || valid_action_cues_contain(&session.action_cues, ActionCueKind::CommitReady)
+                || ActionCue::contains_valid_kind(&session.action_cues, ActionCueKind::CommitReady)
         }
     }
 }
@@ -1418,21 +1408,7 @@ fn action_cues_for_context(
 
     context_snapshot
         .map(|snapshot| snapshot.action_cues.clone())
-        .unwrap_or_else(|| valid_action_cues(&session.action_cues))
-}
-
-fn valid_action_cues(action_cues: &[ActionCue]) -> Vec<ActionCue> {
-    action_cues
-        .iter()
-        .filter(|cue| cue.is_valid())
-        .cloned()
-        .collect()
-}
-
-fn valid_action_cues_contain(action_cues: &[ActionCue], kind: ActionCueKind) -> bool {
-    action_cues
-        .iter()
-        .any(|cue| cue.kind == kind && cue.is_valid())
+        .unwrap_or_else(|| ActionCue::valid_from(&session.action_cues))
 }
 
 fn clear_rest_state_for_session(session: &SessionSnapshot, now: DateTime<Utc>) -> RestState {

@@ -443,6 +443,37 @@ pub struct SessionDelta {
     pub transcript_ambiguous: bool,
 }
 
+impl SessionDelta {
+    pub(crate) fn removed(session_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            kind: SessionDeltaKind::Removed,
+            state: None,
+            tool: None,
+            cwd: None,
+            changed_fields: Vec::new(),
+            transcript_ambiguous: false,
+        }
+    }
+
+    pub(crate) fn observed(
+        session: &SessionSnapshot,
+        kind: SessionDeltaKind,
+        changed_fields: Vec<SessionDeltaField>,
+        transcript_ambiguous: bool,
+    ) -> Self {
+        Self {
+            session_id: session.session_id.clone(),
+            kind,
+            state: Some(session.state),
+            tool: session.tool.clone(),
+            cwd: Some(session.cwd.clone()),
+            changed_fields,
+            transcript_ambiguous,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TimingInfo {
     pub run_started_at: DateTime<Utc>,

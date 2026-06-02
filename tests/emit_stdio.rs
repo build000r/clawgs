@@ -98,6 +98,87 @@ fn fake_grok_script(temp_dir: &TempDir) -> std::path::PathBuf {
     script_path
 }
 
+fn fake_grok_marker_script(temp_dir: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+    let script_path = temp_dir.path().join("fake-grok-marker");
+    let marker_path = temp_dir.path().join("grok-invoked");
+    std::fs::write(
+        &script_path,
+        "#!/usr/bin/env bash\nset -euo pipefail\nprintf 'invoked\\n' > \"${FAKE_GROK_MARKER:?}\"\nprintf 'fake grok thought\\n'\n",
+    )
+    .expect("write fake grok marker");
+    let mut permissions = std::fs::metadata(&script_path)
+        .expect("script metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script_path, permissions).expect("chmod fake grok marker");
+    (script_path, marker_path)
+}
+
+#[test]
+fn perf_emit_stdio_scenario_is_offline_by_default() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let (fake_grok, marker_path) = fake_grok_marker_script(&temp_dir);
+
+    let output = Command::new("bash")
+        .arg("scripts/perf/emit_stdio_scenario.sh")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("CLAWGS_PERF_BIN", env!("CARGO_BIN_EXE_clawgs"))
+        .env("CLAWGS_MODEL_BACKEND", "grok")
+        .env("CLAWGS_GROK_BIN", fake_grok)
+        .env("FAKE_GROK_MARKER", &marker_path)
+        .env_remove("OPENROUTER_API_KEY")
+        .output()
+        .expect("run perf scenario");
+
+    assert!(
+        output.status.success(),
+        "scenario failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("scenario B offline run complete"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !marker_path.exists(),
+        "offline perf scenario should not invoke a model backend"
+    );
+}
+
+#[test]
+fn perf_emit_stdio_scenario_model_enabled_is_opt_in() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let (fake_grok, marker_path) = fake_grok_marker_script(&temp_dir);
+
+    let output = Command::new("bash")
+        .arg("scripts/perf/emit_stdio_scenario.sh")
+        .arg("--model-enabled")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("CLAWGS_PERF_BIN", env!("CARGO_BIN_EXE_clawgs"))
+        .env("CLAWGS_MODEL_BACKEND", "grok")
+        .env("CLAWGS_GROK_BIN", fake_grok)
+        .env("FAKE_GROK_MARKER", &marker_path)
+        .env_remove("OPENROUTER_API_KEY")
+        .output()
+        .expect("run perf scenario");
+
+    assert!(
+        output.status.success(),
+        "scenario failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("scenario B model-enabled run complete"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        marker_path.exists(),
+        "model-enabled perf scenario should preserve backend invocation"
+    );
+}
+
 #[test]
 fn emit_stdio_writes_hello_and_sync_result() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_clawgs"))

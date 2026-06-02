@@ -1,0 +1,7 @@
+[2026-06-02T00:27:18Z] baseline run
+git: 0bc1d18e956f82e1388ced9970bbedacd2a244da
+profile: release-perf
+fingerprint: /Users/b/repos/opensource/clawgs/tests/artifacts/perf/fingerprint.json
+outputs: /Users/b/repos/opensource/clawgs/tests/artifacts/perf/parser-typed-jsonl-v6n12/before/baseline.json, /Users/b/repos/opensource/clawgs/tests/artifacts/perf/parser-typed-jsonl-v6n12/before/baseline.md
+commands:
+  - bash scripts/perf/extract_scenario.sh

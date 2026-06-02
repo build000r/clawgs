@@ -4,14 +4,12 @@ use anyhow::Result;
 use serde_json::Value;
 
 use super::{
-    extract_timestamp, extract_tool_detail, is_harness_markup, push_action, read_jsonl, truncate,
+    extract_timestamp, extract_tool_detail, is_harness_markup, push_action, truncate, visit_jsonl,
     ParseSnapshot,
 };
 use crate::{Action, ExtractOptions};
 
 pub(crate) fn parse(path: &Path, options: &ExtractOptions) -> Result<ParseSnapshot> {
-    let parsed = read_jsonl(path, options.include_raw)?;
-
     let mut user_task: Option<String> = None;
     let mut recent_actions: Vec<Action> = Vec::new();
     let mut current_tool: Option<Action> = None;
@@ -19,7 +17,7 @@ pub(crate) fn parse(path: &Path, options: &ExtractOptions) -> Result<ParseSnapsh
     let mut awaiting_user_input = false;
     let mut awaiting_user_text: Option<String> = None;
 
-    for entry in &parsed.entries {
+    let stats = visit_jsonl(path, options.include_raw, |entry| {
         let ts = extract_timestamp(entry);
         update_user_task(entry, options, &mut user_task);
         update_token_count(entry, &mut token_count);
@@ -30,7 +28,7 @@ pub(crate) fn parse(path: &Path, options: &ExtractOptions) -> Result<ParseSnapsh
             assistant_actions(entry, options, &ts),
             options.max_actions,
         );
-    }
+    })?;
 
     Ok(ParseSnapshot {
         user_task,
@@ -40,10 +38,10 @@ pub(crate) fn parse(path: &Path, options: &ExtractOptions) -> Result<ParseSnapsh
         awaiting_user_input,
         awaiting_user_text,
         commit_signal: None,
-        events_seen: parsed.entries.len() as u64,
-        malformed_lines_skipped: parsed.malformed_lines_skipped,
-        bytes_read: parsed.bytes_read,
-        raw_events: parsed.raw_events,
+        events_seen: stats.events_seen,
+        malformed_lines_skipped: stats.malformed_lines_skipped,
+        bytes_read: stats.bytes_read,
+        raw_events: stats.raw_events,
     })
 }
 

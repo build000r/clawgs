@@ -24,6 +24,7 @@ pub(crate) struct ParseSnapshot {
     pub raw_events: Option<Vec<Value>>,
 }
 
+#[cfg(test)]
 pub(crate) struct ParsedLines {
     pub entries: Vec<Value>,
     pub malformed_lines_skipped: u64,
@@ -31,8 +32,16 @@ pub(crate) struct ParsedLines {
     pub raw_events: Option<Vec<Value>>,
 }
 
+pub(crate) struct JsonlStats {
+    pub events_seen: u64,
+    pub malformed_lines_skipped: u64,
+    pub bytes_read: u64,
+    pub raw_events: Option<Vec<Value>>,
+}
+
 const RAW_EVENT_RING_CAP: usize = 20;
 
+#[cfg(test)]
 pub(crate) fn read_jsonl(path: &Path, include_raw: bool) -> Result<ParsedLines> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     let bytes_read = bytes.len() as u64;
@@ -48,6 +57,26 @@ pub(crate) fn read_jsonl(path: &Path, include_raw: bool) -> Result<ParsedLines> 
     Ok(acc.into_parsed_lines(bytes_read))
 }
 
+pub(crate) fn visit_jsonl(
+    path: &Path,
+    include_raw: bool,
+    mut visit: impl FnMut(&Value),
+) -> Result<JsonlStats> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let bytes_read = bytes.len() as u64;
+
+    let mut stats = JsonlStatsAccumulator::new(include_raw);
+    for line in String::from_utf8_lossy(&bytes)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+    {
+        stats.ingest(line, &mut visit);
+    }
+
+    Ok(stats.into_stats(bytes_read))
+}
+
+#[cfg(test)]
 struct JsonlAccumulator {
     entries: Vec<Value>,
     malformed_lines_skipped: u64,
@@ -55,6 +84,7 @@ struct JsonlAccumulator {
     include_raw: bool,
 }
 
+#[cfg(test)]
 impl JsonlAccumulator {
     fn new(include_raw: bool) -> Self {
         Self {
@@ -89,6 +119,46 @@ impl JsonlAccumulator {
             malformed_lines_skipped: self.malformed_lines_skipped,
             bytes_read,
             raw_events,
+        }
+    }
+}
+
+struct JsonlStatsAccumulator {
+    events_seen: u64,
+    malformed_lines_skipped: u64,
+    raw_events: Vec<Value>,
+    include_raw: bool,
+}
+
+impl JsonlStatsAccumulator {
+    fn new(include_raw: bool) -> Self {
+        Self {
+            events_seen: 0,
+            malformed_lines_skipped: 0,
+            raw_events: Vec::new(),
+            include_raw,
+        }
+    }
+
+    fn ingest(&mut self, line: &str, visit: &mut impl FnMut(&Value)) {
+        match serde_json::from_str::<Value>(line) {
+            Ok(value) => {
+                self.events_seen += 1;
+                if self.include_raw && value.is_object() {
+                    push_raw_event(&mut self.raw_events, value.clone());
+                }
+                visit(&value);
+            }
+            Err(_) => self.malformed_lines_skipped += 1,
+        }
+    }
+
+    fn into_stats(self, bytes_read: u64) -> JsonlStats {
+        JsonlStats {
+            events_seen: self.events_seen,
+            malformed_lines_skipped: self.malformed_lines_skipped,
+            bytes_read,
+            raw_events: self.include_raw.then_some(self.raw_events),
         }
     }
 }
@@ -200,15 +270,13 @@ mod tests {
     #[test]
     fn read_jsonl_skips_bad_lines() {
         let file = NamedTempFile::new().expect("temp file");
-        fs::write(
-            file.path(),
-            "{\"type\":\"a\"}\nnot-json\n{\"type\":\"b\"}\n",
-        )
-        .expect("write");
+        let input = "{\"type\":\"a\"}\nnot-json\n{\"type\":\"b\"}\n";
+        fs::write(file.path(), input).expect("write");
 
         let parsed = read_jsonl(file.path(), false).expect("read jsonl");
         assert_eq!(parsed.entries.len(), 2);
         assert_eq!(parsed.malformed_lines_skipped, 1);
+        assert_eq!(parsed.bytes_read, input.len() as u64);
     }
 
     #[test]
@@ -234,6 +302,36 @@ mod tests {
                 serde_json::json!({"type": "b"}),
             ]),
             "raw_events must remain schema-compliant event objects"
+        );
+    }
+
+    #[test]
+    fn visit_jsonl_streams_entries_and_preserves_stats() {
+        let file = NamedTempFile::new().expect("temp file");
+        let input = "{\"type\":\"a\"}\nnot-json\n42\n{\"type\":\"b\"}\n";
+        fs::write(file.path(), input).expect("write");
+
+        let mut visited = Vec::new();
+        let stats = visit_jsonl(file.path(), true, |value| visited.push(value.clone()))
+            .expect("visit jsonl");
+
+        assert_eq!(
+            visited,
+            vec![
+                serde_json::json!({"type": "a"}),
+                serde_json::json!(42),
+                serde_json::json!({"type": "b"}),
+            ]
+        );
+        assert_eq!(stats.events_seen, 3);
+        assert_eq!(stats.malformed_lines_skipped, 1);
+        assert_eq!(stats.bytes_read, input.len() as u64);
+        assert_eq!(
+            stats.raw_events,
+            Some(vec![
+                serde_json::json!({"type": "a"}),
+                serde_json::json!({"type": "b"}),
+            ])
         );
     }
 

@@ -988,6 +988,105 @@ mod tests {
         assert_eq!(tool, AgentTool::Codex);
     }
 
+    #[test]
+    fn resolve_input_explicit_path_auto_infers_tool_from_contents() {
+        // Auto + explicit `--input`: tool is inferred from the file, and the
+        // result is marked as not discovered (the user supplied the path).
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\"}}\n",
+        )
+        .expect("write file");
+        let cwd = PathBuf::from("/tmp/ignored-when-input-given");
+
+        let resolved = resolve_input(ToolSelection::Auto, &cwd, Some(file.path()))
+            .expect("resolve explicit codex input");
+
+        assert_eq!(resolved.tool, AgentTool::Codex);
+        assert_eq!(resolved.path, file.path());
+        assert!(
+            !resolved.discovered,
+            "an explicitly supplied path is never reported as discovered"
+        );
+    }
+
+    #[test]
+    fn resolve_input_explicit_tool_overrides_file_contents() {
+        // Claude/Codex + explicit `--input`: the requested tool wins outright
+        // and the file is NOT sniffed (so a Claude-shaped file can be force-read
+        // as Codex without an inference round-trip).
+        let claude_file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            claude_file.path(),
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\"}}\n",
+        )
+        .expect("write file");
+        let cwd = PathBuf::from("/tmp/ignored");
+
+        let forced_codex = resolve_input(ToolSelection::Codex, &cwd, Some(claude_file.path()))
+            .expect("force codex");
+        assert_eq!(
+            forced_codex.tool,
+            AgentTool::Codex,
+            "explicit --tool codex must override Claude-shaped file contents"
+        );
+        assert!(!forced_codex.discovered);
+
+        let forced_claude = resolve_input(ToolSelection::Claude, &cwd, Some(claude_file.path()))
+            .expect("force claude");
+        assert_eq!(forced_claude.tool, AgentTool::Claude);
+    }
+
+    #[test]
+    fn resolve_input_explicit_auto_path_errors_when_tool_unidentifiable() {
+        // Auto + explicit path whose contents carry no tool marker must surface
+        // the inference error (propagated from `infer_tool_from_file`) rather
+        // than silently defaulting to a tool.
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(file.path(), "{\"unrelated\":1}\n").expect("write file");
+        let cwd = PathBuf::from("/tmp/ignored");
+
+        let err = resolve_input(ToolSelection::Auto, &cwd, Some(file.path()))
+            .expect_err("unidentifiable explicit input should error");
+        assert!(
+            err.to_string().contains("could not infer tool format"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_input_without_path_falls_through_to_discovery() {
+        // No `--input`: with an empty HOME, discovery finds nothing and the
+        // error path (the discovery arm of resolve_input) is exercised for each
+        // selection. Guarded by the HOME mutex like other discovery tests.
+        let _lock = crate::test_support::home_env_lock().lock().unwrap();
+        let original_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", "");
+        let cwd = PathBuf::from("/tmp/resolve-input-no-discovery");
+
+        let auto_err = resolve_input(ToolSelection::Auto, &cwd, None)
+            .expect_err("auto discovery should find nothing");
+        assert!(auto_err
+            .to_string()
+            .contains("no Claude or Codex transcript JSONL found"));
+
+        let claude_err = resolve_input(ToolSelection::Claude, &cwd, None)
+            .expect_err("claude discovery should find nothing");
+        assert!(claude_err
+            .to_string()
+            .contains("no claude transcript JSONL"));
+
+        let codex_err = resolve_input(ToolSelection::Codex, &cwd, None)
+            .expect_err("codex discovery should find nothing");
+        assert!(codex_err.to_string().contains("no codex transcript JSONL"));
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
     /// Helper: create a fake Claude project dir under a temp HOME with JSONL files.
     /// Returns (temp_dir, cwd, vec of created file paths sorted oldest-first).
     fn setup_claude_project_dir(

@@ -21,7 +21,12 @@ pub(crate) fn parse(path: &Path, options: &ExtractOptions) -> Result<ParseSnapsh
         let ts = extract_timestamp(entry);
         update_user_task(entry, options, &mut user_task);
         update_token_count(entry, &mut token_count);
-        update_awaiting_user_state(entry, &mut awaiting_user_input, &mut awaiting_user_text);
+        update_awaiting_user_state(
+            entry,
+            options,
+            &mut awaiting_user_input,
+            &mut awaiting_user_text,
+        );
         record_actions(
             &mut recent_actions,
             &mut current_tool,
@@ -83,6 +88,7 @@ fn update_token_count(entry: &Value, token_count: &mut u64) {
 
 fn update_awaiting_user_state(
     entry: &Value,
+    options: &ExtractOptions,
     awaiting_user_input: &mut bool,
     awaiting_user_text: &mut Option<String>,
 ) {
@@ -105,7 +111,14 @@ fn update_awaiting_user_state(
     if assistant_has_text(message) {
         let awaiting = assistant_turn_ended(message).unwrap_or(false);
         *awaiting_user_input = awaiting;
-        *awaiting_user_text = awaiting.then(|| assistant_text(message)).flatten();
+        // `awaiting_user_text` is a `short text` field per the clawgs.v2 schema.
+        // Bound it to the same budget as `user_task` so an oversized final
+        // answer (which may contain pasted secrets or other private content)
+        // cannot flow verbatim into the public snapshot.
+        *awaiting_user_text = awaiting
+            .then(|| assistant_text(message))
+            .flatten()
+            .map(|text| truncate(&text, options.max_task_chars));
     }
 }
 
@@ -435,5 +448,50 @@ mod tests {
             snapshot.user_task.as_deref(),
             Some("<div>why is this not centered?</div>")
         );
+    }
+
+    #[test]
+    fn parse_claude_bounds_awaiting_user_text_to_max_task_chars() {
+        // Regression: `awaiting_user_text` is a `short text` field in the
+        // clawgs.v2 schema. An oversized end-of-turn answer (which can carry
+        // pasted secrets or other private content) must be capped to
+        // `max_task_chars` exactly like `user_task`, not surfaced verbatim.
+        let big = "S".repeat(5000);
+        let line = format!(
+            "{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{{\"type\":\"text\",\"text\":\"{big}\"}}]}}}}\n"
+        );
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(file.path(), line).expect("write fixture");
+
+        let options = ExtractOptions::default();
+        let snapshot = parse(file.path(), &options).expect("parse");
+
+        assert!(snapshot.awaiting_user_input);
+        let text = snapshot
+            .awaiting_user_text
+            .expect("end_turn answer should still surface (bounded) text");
+        assert_eq!(
+            text.chars().count(),
+            options.max_task_chars,
+            "awaiting_user_text must be capped at max_task_chars, not surfaced verbatim"
+        );
+        assert!(text.chars().all(|c| c == 'S'));
+    }
+
+    #[test]
+    fn parse_claude_respects_custom_max_task_chars_for_awaiting_text() {
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"abcdefghij\"}]}}\n",
+        )
+        .expect("write fixture");
+
+        let options = ExtractOptions {
+            max_task_chars: 4,
+            ..ExtractOptions::default()
+        };
+        let snapshot = parse(file.path(), &options).expect("parse");
+        assert_eq!(snapshot.awaiting_user_text.as_deref(), Some("abcd"));
     }
 }

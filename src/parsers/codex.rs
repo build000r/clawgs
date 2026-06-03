@@ -34,7 +34,12 @@ pub(crate) fn parse(path: &Path, options: &ExtractOptions) -> Result<ParseSnapsh
         let ts = extract_timestamp(entry);
         update_user_task(entry, options, &mut user_task);
         update_token_count(entry, &mut token_count);
-        update_awaiting_user_state(entry, &mut awaiting_user_input, &mut awaiting_user_text);
+        update_awaiting_user_state(
+            entry,
+            options,
+            &mut awaiting_user_input,
+            &mut awaiting_user_text,
+        );
 
         observe_and_record(
             function_call_observation(entry, options, &ts),
@@ -166,6 +171,7 @@ fn internal_warning_text(text: &str) -> bool {
 
 fn update_awaiting_user_state(
     entry: &Value,
+    options: &ExtractOptions,
     awaiting_user_input: &mut bool,
     awaiting_user_text: &mut Option<String>,
 ) {
@@ -185,7 +191,11 @@ fn update_awaiting_user_state(
 
     if let Some((awaiting, text)) = assistant_turn_state(entry) {
         *awaiting_user_input = awaiting;
-        *awaiting_user_text = text;
+        // `awaiting_user_text` is a `short text` field per the clawgs.v2 schema.
+        // Bound it to the same budget as `user_task` so an oversized final
+        // answer (which may contain pasted secrets or other private content)
+        // cannot flow verbatim into the public snapshot.
+        *awaiting_user_text = text.map(|text| truncate(&text, options.max_task_chars));
         return;
     }
 
@@ -1595,5 +1605,131 @@ mod tests {
                 commit_seen: false,
             })
         );
+    }
+
+    #[test]
+    fn event_message_state_marks_final_answer_agent_message_as_awaiting() {
+        // `event_msg` final answers arrive as `agent_message` payloads (distinct
+        // from the `response_item` `message` shape). This branch of
+        // `event_message_state` was previously the least-covered awaiting path.
+        let payload = serde_json::json!({
+            "type": "agent_message",
+            "phase": "final_answer",
+            "content": [{"type": "output_text", "text": "  Should I proceed?  "}]
+        });
+
+        assert_eq!(
+            event_message_state(&payload),
+            Some((true, Some("Should I proceed?".to_string())))
+        );
+    }
+
+    #[test]
+    fn event_message_state_non_final_phase_is_not_awaiting() {
+        // An `agent_message` that is not a final answer is mid-turn: awaiting
+        // must stay false and no text is surfaced.
+        let payload = serde_json::json!({
+            "type": "agent_message",
+            "phase": "commentary",
+            "content": [{"type": "output_text", "text": "still working"}]
+        });
+
+        assert_eq!(event_message_state(&payload), Some((false, None)));
+    }
+
+    #[test]
+    fn event_message_state_final_answer_with_empty_content_yields_no_text() {
+        // Final answer flag set, but the content is whitespace-only: awaiting is
+        // still true (the structural signal holds) while the text is dropped.
+        let payload = serde_json::json!({
+            "type": "agent_message",
+            "phase": "final_answer",
+            "content": [{"type": "output_text", "text": "   "}]
+        });
+
+        assert_eq!(event_message_state(&payload), Some((true, None)));
+    }
+
+    #[test]
+    fn event_message_state_ignores_non_agent_message_events() {
+        let payload = serde_json::json!({
+            "type": "token_count",
+            "phase": "final_answer"
+        });
+
+        assert_eq!(event_message_state(&payload), None);
+    }
+
+    #[test]
+    fn parse_codex_marks_agent_message_event_final_answer_as_awaiting() {
+        // End-to-end: an `event_msg` `agent_message` final answer drives the
+        // snapshot awaiting fields, exercising the `event_msg` arm of
+        // `assistant_turn_state` that the response_item tests do not.
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Need a decision from you.\"}]}}\n",
+        )
+        .expect("write fixture");
+
+        let snapshot = parse(file.path(), &ExtractOptions::default()).expect("parse");
+        assert!(snapshot.awaiting_user_input);
+        assert_eq!(
+            snapshot.awaiting_user_text.as_deref(),
+            Some("Need a decision from you.")
+        );
+    }
+
+    #[test]
+    fn parse_codex_bounds_awaiting_user_text_to_max_task_chars() {
+        // Regression: `awaiting_user_text` is a `short text` field in the
+        // clawgs.v2 schema. An oversized assistant final answer (which can carry
+        // pasted secrets or other private content) must NOT flow verbatim into
+        // the public snapshot; it is capped to `max_task_chars` exactly like
+        // `user_task`.
+        let big = "S".repeat(5000);
+        let line = format!(
+            "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{{\"type\":\"output_text\",\"text\":\"{big}\"}}]}}}}\n"
+        );
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(file.path(), line).expect("write fixture");
+
+        let options = ExtractOptions::default();
+        let snapshot = parse(file.path(), &options).expect("parse");
+
+        assert!(snapshot.awaiting_user_input);
+        let text = snapshot
+            .awaiting_user_text
+            .expect("final answer should still surface (bounded) text");
+        assert_eq!(
+            text.chars().count(),
+            options.max_task_chars,
+            "awaiting_user_text must be capped at max_task_chars, not surfaced verbatim"
+        );
+        assert!(
+            text.chars().count() < big.chars().count(),
+            "oversized final answer must be truncated"
+        );
+        assert!(
+            text.chars().all(|c| c == 'S'),
+            "truncation should preserve a prefix of the original answer"
+        );
+    }
+
+    #[test]
+    fn parse_codex_respects_custom_max_task_chars_for_awaiting_text() {
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"abcdefghij\"}]}}\n",
+        )
+        .expect("write fixture");
+
+        let options = ExtractOptions {
+            max_task_chars: 4,
+            ..ExtractOptions::default()
+        };
+        let snapshot = parse(file.path(), &options).expect("parse");
+        assert_eq!(snapshot.awaiting_user_text.as_deref(), Some("abcd"));
     }
 }

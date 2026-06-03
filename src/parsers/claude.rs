@@ -112,12 +112,16 @@ fn update_awaiting_user_state(
         let awaiting = assistant_turn_ended(message).unwrap_or(false);
         *awaiting_user_input = awaiting;
         // `awaiting_user_text` is a `short text` field per the clawgs.v2 schema.
-        // Bound it to the same budget as `user_task` so an oversized final
-        // answer (which may contain pasted secrets or other private content)
-        // cannot flow verbatim into the public snapshot.
+        // Apply the same redaction the `user_task` path uses so a final answer
+        // that opens with a harness wrapper (`<system-reminder>...`) is dropped
+        // rather than surfaced, and bound the remaining text to the same budget
+        // as `user_task` so an oversized final answer (which may contain pasted
+        // secrets or other private content) cannot flow verbatim into the
+        // public snapshot.
         *awaiting_user_text = awaiting
             .then(|| assistant_text(message))
             .flatten()
+            .filter(|text| !is_harness_markup(text))
             .map(|text| truncate(&text, options.max_task_chars));
     }
 }
@@ -476,6 +480,49 @@ mod tests {
             "awaiting_user_text must be capped at max_task_chars, not surfaced verbatim"
         );
         assert!(text.chars().all(|c| c == 'S'));
+    }
+
+    #[test]
+    fn parse_claude_drops_harness_markup_awaiting_user_text() {
+        // Asymmetry fix: `awaiting_user_text` must run through `is_harness_markup`
+        // like `user_task`. An end-of-turn answer that opens with a harness
+        // wrapper must not surface (even truncated) in the public snapshot.
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"<system-reminder>internal wrapper leaked into final answer</system-reminder>\"}]}}\n",
+        )
+        .expect("write fixture");
+
+        let snapshot = parse(file.path(), &ExtractOptions::default()).expect("parse");
+        assert!(
+            snapshot.awaiting_user_input,
+            "structural end_turn signal still flips awaiting"
+        );
+        assert!(
+            snapshot.awaiting_user_text.is_none(),
+            "harness-markup final answer must not surface in awaiting_user_text"
+        );
+    }
+
+    #[test]
+    fn parse_claude_preserves_legitimate_awaiting_user_text() {
+        // The harness filter must not drop a genuine end-of-turn answer that
+        // merely contains XML-ish content.
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"Should I wrap it in a <div>?\"}]}}\n",
+        )
+        .expect("write fixture");
+
+        let snapshot = parse(file.path(), &ExtractOptions::default()).expect("parse");
+        assert!(snapshot.awaiting_user_input);
+        assert_eq!(
+            snapshot.awaiting_user_text.as_deref(),
+            Some("Should I wrap it in a <div>?"),
+            "legitimate end-of-turn answer must still surface"
+        );
     }
 
     #[test]

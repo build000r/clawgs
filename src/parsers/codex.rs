@@ -160,6 +160,12 @@ fn user_event_message_text(payload: &Value) -> Option<String> {
         .and_then(|_| payload.get("message").and_then(Value::as_str))
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        // Apply the same harness-markup filter as the `response_item` user path
+        // (`user_response_item_text`). Without this, a harness wrapper delivered
+        // as a `user_message` event (`<system-reminder>...`, slash-command or
+        // hook output) would surface as the public `user_task`. The shared
+        // length cap is applied downstream in `update_user_task`.
+        .filter(|value| !is_harness_markup(value))
         .map(ToString::to_string)
 }
 
@@ -192,10 +198,15 @@ fn update_awaiting_user_state(
     if let Some((awaiting, text)) = assistant_turn_state(entry) {
         *awaiting_user_input = awaiting;
         // `awaiting_user_text` is a `short text` field per the clawgs.v2 schema.
-        // Bound it to the same budget as `user_task` so an oversized final
-        // answer (which may contain pasted secrets or other private content)
-        // cannot flow verbatim into the public snapshot.
-        *awaiting_user_text = text.map(|text| truncate(&text, options.max_task_chars));
+        // Apply the same redaction the `user_task` path uses so a final answer
+        // that opens with a harness wrapper (`<system-reminder>...`) is dropped
+        // rather than surfaced, and bound the remaining text to the same budget
+        // as `user_task` so an oversized final answer (which may contain pasted
+        // secrets or other private content) cannot flow verbatim into the
+        // public snapshot.
+        *awaiting_user_text = text
+            .filter(|text| !is_harness_markup(text))
+            .map(|text| truncate(&text, options.max_task_chars));
         return;
     }
 
@@ -1024,6 +1035,111 @@ mod tests {
         });
 
         assert_eq!(user_response_item_text(&payload), None);
+    }
+
+    #[test]
+    fn user_event_message_text_rejects_harness_wrappers() {
+        // Asymmetry fix: the `event_msg`/`user_message` task path must apply the
+        // same `is_harness_markup` filter as the `response_item` path. Without
+        // the filter these harness wrappers would surface as the public
+        // `user_task`.
+        for raw in [
+            "<system-reminder>be quiet</system-reminder>",
+            "<command-name>codebase-audit</command-name>",
+            "<bash-input>ls -la</bash-input>",
+            "  <local-command-stdout>output</local-command-stdout>",
+        ] {
+            let payload = serde_json::json!({"type": "user_message", "message": raw});
+            assert_eq!(
+                user_event_message_text(&payload),
+                None,
+                "user_message harness markup must be dropped: {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn user_event_message_text_preserves_legitimate_content() {
+        // The harness-markup filter must not drop genuine user prompts, including
+        // ones that merely contain or begin with XML-ish syntax.
+        for raw in [
+            "Build a parser",
+            "<div>why is this not centered?</div>",
+            "Here is my HTML: <template>...</template>",
+        ] {
+            let payload = serde_json::json!({"type": "user_message", "message": raw});
+            assert_eq!(
+                user_event_message_text(&payload).as_deref(),
+                Some(raw),
+                "legitimate user_message content must be preserved: {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_codex_filters_harness_markup_from_event_message_user_task() {
+        // End-to-end: a genuine task arrives via `user_message`, then a later
+        // harness-injected `user_message` (system-reminder) must NOT overwrite
+        // the real task — matching the `response_item` user path.
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            concat!(
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Summarize the failing tests\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"<system-reminder>keep going</system-reminder>\"}}\n"
+            ),
+        )
+        .expect("write fixture");
+
+        let snapshot = parse(file.path(), &ExtractOptions::default()).expect("parse");
+        assert_eq!(
+            snapshot.user_task.as_deref(),
+            Some("Summarize the failing tests"),
+            "harness markup via user_message must not overwrite the real user task"
+        );
+    }
+
+    #[test]
+    fn parse_codex_drops_harness_markup_awaiting_user_text() {
+        // Asymmetry fix: `awaiting_user_text` must run through `is_harness_markup`
+        // like `user_task`. A final answer that opens with a harness wrapper must
+        // not surface (even truncated) in the public snapshot.
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"<system-reminder>internal wrapper leaked into final answer</system-reminder>\"}]}}\n",
+        )
+        .expect("write fixture");
+
+        let snapshot = parse(file.path(), &ExtractOptions::default()).expect("parse");
+        assert!(
+            snapshot.awaiting_user_input,
+            "structural final-answer signal still flips awaiting"
+        );
+        assert!(
+            snapshot.awaiting_user_text.is_none(),
+            "harness-markup final answer must not surface in awaiting_user_text"
+        );
+    }
+
+    #[test]
+    fn parse_codex_preserves_legitimate_awaiting_user_text() {
+        // The harness filter must not drop a genuine final answer that merely
+        // contains XML-ish content.
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(
+            file.path(),
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Should I wrap it in a <div>?\"}]}}\n",
+        )
+        .expect("write fixture");
+
+        let snapshot = parse(file.path(), &ExtractOptions::default()).expect("parse");
+        assert!(snapshot.awaiting_user_input);
+        assert_eq!(
+            snapshot.awaiting_user_text.as_deref(),
+            Some("Should I wrap it in a <div>?"),
+            "legitimate final answer must still surface"
+        );
     }
 
     #[test]

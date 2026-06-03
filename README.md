@@ -159,6 +159,14 @@ cargo install clawgs
 
 That gets you a `clawgs` binary on your `PATH` with no repo checkout required.
 
+The current published crate is `0.2.0`. On lean hosts without system OpenSSL and
+`pkg-config`, `0.2.0` can fail to build because it links the default
+`native-tls` backend. The fix (pure-Rust `rustls-tls`, no OpenSSL) ships in
+`0.3.0`; once `0.3.0` is published, the portable one-liner that needs no system
+OpenSSL is `cargo install clawgs --version 0.3.0 --locked`. A verified
+clean-install transcript lives in
+[docs/INSTALL.md](https://github.com/build000r/clawgs/blob/main/docs/INSTALL.md).
+
 ### From Source
 
 ```bash

@@ -69,6 +69,17 @@ delta facts, and Claude Code hook wake-ups explicit.
 - Added `scripts/check.sh` coverage for the `defaults` command in addition to
   help and fixture extraction.
 
+### Packaging And Install
+
+- Switched `reqwest` from the default `native-tls` backend to pure-Rust
+  `rustls-tls` (no `openssl-sys`), so `cargo install` works on lean hosts
+  without system OpenSSL or `pkg-config`. The published `0.2.0` could fail to
+  build on such hosts; `0.3.0` resolves TLS through `rustls` only and `openssl`
+  no longer appears in `Cargo.lock`.
+- Added [`docs/INSTALL.md`](docs/INSTALL.md): a checked-in, sanitized
+  clean-install proof covering `cargo install --path . --locked` and the
+  zero-config `demo extract` / `demo emit` flows.
+
 ## [0.2.0] - 2026-05-06
 
 `0.2.0` is the canonical v2 schema/protocol release. It promotes the public

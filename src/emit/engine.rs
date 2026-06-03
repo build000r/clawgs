@@ -29,6 +29,8 @@ const TERMINAL_CONTEXT_CHARS: usize = 800;
 const TERMINAL_MIN_MEANINGFUL_DELTA_CHARS: usize = 100;
 const MAX_THOUGHT_CHARS: usize = 120;
 const DROWSY_AFTER_MS: i64 = 10_000;
+const DEFAULT_GROK_CADENCE_MULTIPLIER: u64 = 10;
+const GROK_CADENCE_MULTIPLIER_ENV: &str = "CLAWGS_GROK_CADENCE_MULTIPLIER";
 
 pub const DEFAULT_AGENT_PREAMBLE: &str = "You are a status reporter for a coding agent session.";
 pub const DEFAULT_TERMINAL_PREAMBLE: &str = "Terminal session status reporter.";
@@ -263,19 +265,30 @@ impl SessionRuntimeState {
         }
     }
 
-    fn cadence_for_state(&self, config: &ThoughtConfig, now: DateTime<Utc>) -> u64 {
-        match self.cadence_tier(config, now) {
+    fn cadence_for_state(
+        &self,
+        config: &ThoughtConfig,
+        now: DateTime<Utc>,
+        cadence_multiplier: u64,
+    ) -> u64 {
+        let base = match self.cadence_tier(config, now) {
             CadenceTier::Cold => config.cadence_cold_ms,
             CadenceTier::Warm => config.cadence_warm_ms,
             CadenceTier::Hot => config.cadence_hot_ms,
-        }
+        };
+        base.saturating_mul(cadence_multiplier.max(1))
     }
 
-    fn should_call_for_cadence(&self, config: &ThoughtConfig, now: DateTime<Utc>) -> bool {
+    fn should_call_for_cadence(
+        &self,
+        config: &ThoughtConfig,
+        now: DateTime<Utc>,
+        cadence_multiplier: u64,
+    ) -> bool {
         match self.last_call_at {
             Some(last_call) => {
                 let elapsed_ms = (now - last_call).num_milliseconds();
-                elapsed_ms >= self.cadence_for_state(config, now) as i64
+                elapsed_ms >= self.cadence_for_state(config, now, cadence_multiplier) as i64
             }
             None => true,
         }
@@ -295,6 +308,7 @@ struct PreparedSessionContext {
 pub struct EmitEngine {
     clients: HashMap<ModelBackend, Box<dyn ModelClient>>,
     default_backend: ModelBackend,
+    grok_cadence_multiplier: u64,
     per_session: HashMap<String, SessionRuntimeState>,
     stream_instance_id: String,
 }
@@ -305,11 +319,24 @@ impl EmitEngine {
     }
 
     pub fn with_backend(model_client: Box<dyn ModelClient>, default_backend: ModelBackend) -> Self {
+        Self::with_backend_and_grok_cadence_multiplier(
+            model_client,
+            default_backend,
+            configured_grok_cadence_multiplier(),
+        )
+    }
+
+    fn with_backend_and_grok_cadence_multiplier(
+        model_client: Box<dyn ModelClient>,
+        default_backend: ModelBackend,
+        grok_cadence_multiplier: u64,
+    ) -> Self {
         let mut clients: HashMap<ModelBackend, Box<dyn ModelClient>> = HashMap::new();
         clients.insert(default_backend, model_client);
         Self {
             clients,
             default_backend,
+            grok_cadence_multiplier: grok_cadence_multiplier.max(1),
             per_session: HashMap::new(),
             stream_instance_id: format!(
                 "stream-{}-{}",
@@ -343,6 +370,8 @@ impl EmitEngine {
             .config
             .backend_override()
             .unwrap_or(self.default_backend);
+        let cadence_multiplier =
+            cadence_multiplier_for_backend(backend, self.grok_cadence_multiplier);
 
         if let Err(err) = self.ensure_client(backend) {
             metrics.last_backend_error = Some(err.message);
@@ -350,6 +379,7 @@ impl EmitEngine {
                 self.carry_forward_sessions(
                     request,
                     &transcript_group_counts,
+                    cadence_multiplier,
                     &mut updates,
                     &mut metrics,
                 );
@@ -374,6 +404,7 @@ impl EmitEngine {
                 request,
                 session,
                 &transcript_group_counts,
+                cadence_multiplier,
                 &mut updates,
                 &mut metrics,
             );
@@ -429,6 +460,7 @@ impl EmitEngine {
         &mut self,
         request: &SyncRequest,
         transcript_group_counts: &HashMap<String, usize>,
+        cadence_multiplier: u64,
         updates: &mut Vec<ThoughtUpdate>,
         metrics: &mut SyncMetrics,
     ) {
@@ -449,6 +481,7 @@ impl EmitEngine {
                 session,
                 &request.config,
                 request.now,
+                cadence_multiplier,
                 updates,
                 metrics,
             ) {
@@ -480,6 +513,7 @@ impl EmitEngine {
                 next_commit_candidate,
                 &next_action_cues,
                 request.now,
+                cadence_multiplier,
             );
         }
     }
@@ -512,6 +546,7 @@ impl EmitEngine {
                     false,
                     &[],
                     state.objective_fingerprint.clone(),
+                    1,
                 ));
                 state.last_emitted_thought = None;
                 state.thought_state = ThoughtState::Holding;
@@ -560,6 +595,7 @@ fn handle_exited_session(
     session: &SessionSnapshot,
     config: &ThoughtConfig,
     now: DateTime<Utc>,
+    cadence_multiplier: u64,
     updates: &mut Vec<ThoughtUpdate>,
     metrics: &mut SyncMetrics,
 ) -> bool {
@@ -580,6 +616,7 @@ fn handle_exited_session(
             false,
             &[],
             state.objective_fingerprint.clone(),
+            cadence_multiplier,
         ));
         state.last_emitted_thought = None;
         state.thought_state = ThoughtState::Holding;
@@ -603,6 +640,7 @@ fn process_session(
     request: &SyncRequest,
     session: &SessionSnapshot,
     transcript_group_counts: &HashMap<String, usize>,
+    cadence_multiplier: u64,
     updates: &mut Vec<ThoughtUpdate>,
     metrics: &mut SyncMetrics,
 ) {
@@ -618,6 +656,7 @@ fn process_session(
         session,
         &request.config,
         request.now,
+        cadence_multiplier,
         updates,
         metrics,
     ) {
@@ -649,6 +688,7 @@ fn process_session(
         next_commit_candidate,
         &next_action_cues,
         updates,
+        cadence_multiplier,
         metrics,
     ) {
         return;
@@ -665,6 +705,7 @@ fn process_session(
         next_commit_candidate,
         &next_action_cues,
         updates,
+        cadence_multiplier,
     );
 
     let Some(prepared) = prepare_session_context(
@@ -679,6 +720,7 @@ fn process_session(
         next_commit_candidate,
         next_action_cues,
         updates,
+        cadence_multiplier,
         metrics,
     ) else {
         return;
@@ -698,6 +740,7 @@ fn process_session(
         prepared.next_commit_candidate,
         &prepared.next_action_cues,
         updates,
+        cadence_multiplier,
         metrics,
     ) {
         return;
@@ -710,6 +753,7 @@ fn process_session(
         request,
         session,
         &prepared,
+        cadence_multiplier,
         updates,
         metrics,
     );
@@ -726,6 +770,7 @@ fn wake_from_sleep_if_needed(
     next_commit_candidate: bool,
     next_action_cues: &[ActionCue],
     updates: &mut Vec<ThoughtUpdate>,
+    cadence_multiplier: u64,
 ) -> bool {
     if state.thought_state != ThoughtState::Sleeping {
         return false;
@@ -745,6 +790,7 @@ fn wake_from_sleep_if_needed(
         next_commit_candidate,
         next_action_cues,
         state.objective_fingerprint.clone(),
+        cadence_multiplier,
     ));
     state.thought_state = ThoughtState::Holding;
     state.thought_source = ThoughtSource::CarryForward;
@@ -768,6 +814,7 @@ fn prepare_session_context(
     next_commit_candidate: bool,
     next_action_cues: Vec<ActionCue>,
     updates: &mut Vec<ThoughtUpdate>,
+    cadence_multiplier: u64,
     metrics: &mut SyncMetrics,
 ) -> Option<PreparedSessionContext> {
     if suppress_for_initial_context(
@@ -782,6 +829,7 @@ fn prepare_session_context(
         next_commit_candidate,
         &next_action_cues,
         updates,
+        cadence_multiplier,
         metrics,
     ) {
         return None;
@@ -828,6 +876,7 @@ fn emit_session_thought(
     request: &SyncRequest,
     session: &SessionSnapshot,
     prepared: &PreparedSessionContext,
+    cadence_multiplier: u64,
     updates: &mut Vec<ThoughtUpdate>,
     metrics: &mut SyncMetrics,
 ) {
@@ -847,6 +896,7 @@ fn emit_session_thought(
             prepared.next_commit_candidate,
             &prepared.next_action_cues,
             request.now,
+            cadence_multiplier,
         );
         return;
     };
@@ -865,6 +915,7 @@ fn emit_session_thought(
             prepared.next_commit_candidate,
             &prepared.next_action_cues,
             request.now,
+            cadence_multiplier,
         ) {
             metrics.suppressed += 1;
         }
@@ -883,6 +934,7 @@ fn emit_session_thought(
         prepared.next_commit_candidate,
         &prepared.next_action_cues,
         request.now,
+        cadence_multiplier,
         metrics,
     ) {
         return;
@@ -896,6 +948,7 @@ fn emit_session_thought(
         &thought,
         prepared,
         request.now,
+        cadence_multiplier,
         updates,
     );
 }
@@ -958,6 +1011,7 @@ fn handle_duplicate_generated_thought(
     next_commit_candidate: bool,
     next_action_cues: &[ActionCue],
     now: DateTime<Utc>,
+    cadence_multiplier: u64,
     metrics: &mut SyncMetrics,
 ) -> bool {
     if !is_duplicate_thought(state.last_emitted_thought.as_deref(), thought) {
@@ -975,6 +1029,7 @@ fn handle_duplicate_generated_thought(
         next_commit_candidate,
         next_action_cues,
         now,
+        cadence_multiplier,
     ) {
         return true;
     }
@@ -990,6 +1045,7 @@ fn publish_generated_thought(
     thought: &str,
     prepared: &PreparedSessionContext,
     now: DateTime<Utc>,
+    cadence_multiplier: u64,
     updates: &mut Vec<ThoughtUpdate>,
 ) {
     let next_state = next_thought_state(prepared.objective_changed);
@@ -1011,6 +1067,7 @@ fn publish_generated_thought(
         &prepared.next_action_cues,
         config,
         prepared.context_source,
+        cadence_multiplier,
     ));
 
     state.last_emitted_thought = Some(thought.to_string());
@@ -1073,6 +1130,7 @@ fn handle_sleeping_session(
     next_commit_candidate: bool,
     next_action_cues: &[ActionCue],
     updates: &mut Vec<ThoughtUpdate>,
+    cadence_multiplier: u64,
     metrics: &mut SyncMetrics,
 ) -> bool {
     if !is_sleeping_rest_state(next_rest_state) {
@@ -1109,6 +1167,7 @@ fn handle_sleeping_session(
             next_action_cues,
             config,
             context_source,
+            cadence_multiplier,
         ));
     } else {
         metrics.suppressed += 1;
@@ -1137,6 +1196,7 @@ fn suppress_for_initial_context(
     next_commit_candidate: bool,
     next_action_cues: &[ActionCue],
     updates: &mut Vec<ThoughtUpdate>,
+    cadence_multiplier: u64,
     metrics: &mut SyncMetrics,
 ) -> bool {
     if is_initial_thought_candidate(state, session)
@@ -1159,6 +1219,7 @@ fn suppress_for_initial_context(
             next_commit_candidate,
             next_action_cues,
             now,
+            cadence_multiplier,
         ) {
             return true;
         }
@@ -1196,6 +1257,7 @@ fn clear_thought_update(
     commit_candidate: bool,
     action_cues: &[ActionCue],
     objective_fingerprint: Option<String>,
+    cadence_multiplier: u64,
 ) -> ThoughtUpdate {
     thought_update(
         stream_instance_id,
@@ -1214,6 +1276,7 @@ fn clear_thought_update(
         action_cues,
         config,
         context_source,
+        cadence_multiplier,
     )
 }
 
@@ -1228,6 +1291,7 @@ fn emit_passive_state_change_if_needed(
     next_commit_candidate: bool,
     next_action_cues: &[ActionCue],
     now: DateTime<Utc>,
+    cadence_multiplier: u64,
 ) -> bool {
     let first_observation_has_visible_state = state.emission_seq == 0
         && state.last_emitted_thought.is_none()
@@ -1259,6 +1323,7 @@ fn emit_passive_state_change_if_needed(
         next_action_cues,
         config,
         context_source,
+        cadence_multiplier,
     ));
     state.thought_state = thought_state;
     state.thought_source = thought_source;
@@ -1331,6 +1396,7 @@ fn thought_update(
     action_cues: &[ActionCue],
     config: &ThoughtConfig,
     context_source: ContextSource,
+    cadence_multiplier: u64,
 ) -> ThoughtUpdate {
     ThoughtUpdate {
         session_id: session.session_id.clone(),
@@ -1349,7 +1415,13 @@ fn thought_update(
         commit_candidate,
         action_cues: action_cues.to_vec(),
         timing: Some(timing_info_for_update(state, session, at)),
-        cues: Some(cue_info_for_update(state, config, at, context_source)),
+        cues: Some(cue_info_for_update(
+            state,
+            config,
+            at,
+            context_source,
+            cadence_multiplier,
+        )),
     }
 }
 
@@ -1439,8 +1511,17 @@ fn should_suppress_for_cadence(
     objective_changed: bool,
     woke_from_sleep: bool,
     now: DateTime<Utc>,
+    cadence_multiplier: u64,
 ) -> bool {
-    !objective_changed && !woke_from_sleep && !state.should_call_for_cadence(config, now)
+    if woke_from_sleep {
+        return false;
+    }
+    let cadence_due = state.should_call_for_cadence(config, now, cadence_multiplier);
+    if cadence_multiplier > 1 {
+        !cadence_due
+    } else {
+        !objective_changed && !cadence_due
+    }
 }
 
 fn should_suppress_for_terminal_delta(
@@ -1473,9 +1554,17 @@ fn suppress_for_cadence_or_terminal_delta(
     next_commit_candidate: bool,
     next_action_cues: &[ActionCue],
     updates: &mut Vec<ThoughtUpdate>,
+    cadence_multiplier: u64,
     metrics: &mut SyncMetrics,
 ) -> bool {
-    if should_suppress_for_cadence(state, config, objective_changed, woke_from_sleep, now) {
+    if should_suppress_for_cadence(
+        state,
+        config,
+        objective_changed,
+        woke_from_sleep,
+        now,
+        cadence_multiplier,
+    ) {
         return suppress_with_passive_state_change(
             updates,
             stream_instance_id,
@@ -1487,6 +1576,7 @@ fn suppress_for_cadence_or_terminal_delta(
             next_commit_candidate,
             next_action_cues,
             now,
+            cadence_multiplier,
             metrics,
         );
     }
@@ -1509,6 +1599,7 @@ fn suppress_for_cadence_or_terminal_delta(
             next_commit_candidate,
             next_action_cues,
             now,
+            cadence_multiplier,
             metrics,
         );
     }
@@ -1527,6 +1618,7 @@ fn suppress_with_passive_state_change(
     next_commit_candidate: bool,
     next_action_cues: &[ActionCue],
     now: DateTime<Utc>,
+    cadence_multiplier: u64,
     metrics: &mut SyncMetrics,
 ) -> bool {
     if emit_passive_state_change_if_needed(
@@ -1540,6 +1632,7 @@ fn suppress_with_passive_state_change(
         next_commit_candidate,
         next_action_cues,
         now,
+        cadence_multiplier,
     ) {
         true
     } else {
@@ -1554,6 +1647,21 @@ fn context_source_for_snapshot(context_snapshot: Option<&Snapshot>) -> ContextSo
     } else {
         ContextSource::Terminal
     }
+}
+
+fn cadence_multiplier_for_backend(backend: ModelBackend, grok_cadence_multiplier: u64) -> u64 {
+    match backend {
+        ModelBackend::GrokCli => grok_cadence_multiplier.max(1),
+        ModelBackend::OpenRouter => 1,
+    }
+}
+
+fn configured_grok_cadence_multiplier() -> u64 {
+    std::env::var(GROK_CADENCE_MULTIPLIER_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_GROK_CADENCE_MULTIPLIER)
 }
 
 fn initial_run_started_at(session: &SessionSnapshot, now: DateTime<Utc>) -> DateTime<Utc> {
@@ -1611,8 +1719,9 @@ fn cue_info_for_update(
     config: &ThoughtConfig,
     now: DateTime<Utc>,
     context_source: ContextSource,
+    cadence_multiplier: u64,
 ) -> CueInfo {
-    let cadence_ms = state.cadence_for_state(config, now);
+    let cadence_ms = state.cadence_for_state(config, now, cadence_multiplier);
     CueInfo {
         cadence_tier: state.cadence_tier(config, now),
         cadence_ms,
@@ -2184,7 +2293,10 @@ fn hash_string(value: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::sync::MutexGuard;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, MutexGuard,
+    };
 
     use chrono::Duration;
     use tempfile::tempdir;
@@ -2253,6 +2365,18 @@ mod tests {
         }
     }
 
+    struct CountingModelClient {
+        response: String,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ModelClient for CountingModelClient {
+        fn complete(&self, _prompt: &str, _model_override: Option<&str>) -> Result<String, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.response.clone())
+        }
+    }
+
     fn mock_engine(response: &str) -> EmitEngine {
         EmitEngine::with_backend(
             Box::new(MockModelClient {
@@ -2269,6 +2393,22 @@ mod tests {
             }),
             ModelBackend::OpenRouter,
         )
+    }
+
+    fn counting_grok_engine(
+        response: &str,
+        cadence_multiplier: u64,
+    ) -> (EmitEngine, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let engine = EmitEngine::with_backend_and_grok_cadence_multiplier(
+            Box::new(CountingModelClient {
+                response: response.to_string(),
+                calls: Arc::clone(&calls),
+            }),
+            ModelBackend::GrokCli,
+            cadence_multiplier,
+        );
+        (engine, calls)
     }
 
     fn sample_session(now: DateTime<Utc>) -> SessionSnapshot {
@@ -2503,6 +2643,7 @@ mod tests {
             false,
             &[],
             &mut updates,
+            1,
             &mut metrics,
         );
 
@@ -2588,6 +2729,47 @@ mod tests {
         assert_eq!(second_result.updates.len(), 0);
         assert_eq!(second_result.metrics.llm_calls, 0);
         assert!(second_result.metrics.suppressed > 0);
+    }
+
+    #[test]
+    fn grok_multiplier_throttles_repeated_objective_change_ticks() {
+        let now = Utc::now();
+        let (mut engine, calls) = counting_grok_engine("narrating agent progress", 10);
+        let mut llm_call_sum = 0;
+        let mut first_update_cues = None;
+
+        for index in 0..20 {
+            let tick = now + Duration::seconds(15 * index);
+            let mut session = sample_session(tick);
+            session.replay_text = format!(
+                "cargo test --all\n\
+                 test emit::engine::sync_tick_{index} ... ok\n\
+                 reviewing iteration {index} of the live narrator workload with enough changed terminal text to force a new objective fingerprint\n"
+            );
+
+            let result = engine.sync(&SyncRequest {
+                id: format!("req-{index}"),
+                now: tick,
+                config: ThoughtConfig::default(),
+                sessions: vec![session],
+            });
+            llm_call_sum += result.metrics.llm_calls;
+            if first_update_cues.is_none() {
+                first_update_cues = result
+                    .updates
+                    .first()
+                    .and_then(|update| update.cues.clone());
+            }
+        }
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(llm_call_sum, 2);
+        let cues = first_update_cues.expect("first Grok update should include cues");
+        assert_eq!(cues.cadence_ms, 150_000);
+        assert_eq!(
+            cues.next_llm_eligible_at,
+            now + Duration::milliseconds(150_000)
+        );
     }
 
     #[test]
@@ -2999,6 +3181,7 @@ mod tests {
             false,
             &action_cues,
             &mut updates,
+            1,
             &mut metrics,
         );
 
@@ -3042,6 +3225,7 @@ mod tests {
             false,
             &[],
             &mut updates,
+            1,
             &mut metrics,
         );
 
@@ -3323,6 +3507,7 @@ mod tests {
             false,
             &[],
             &mut first_updates,
+            1,
             &mut first_metrics,
         );
         assert_eq!(first_updates.len(), 1);
@@ -3342,6 +3527,7 @@ mod tests {
             false,
             &[],
             &mut second_updates,
+            1,
             &mut second_metrics,
         );
         assert!(second_updates.is_empty());
@@ -3942,6 +4128,7 @@ mod tests {
         engine.carry_forward_sessions(
             &request,
             &transcript_group_counts,
+            1,
             &mut updates,
             &mut metrics,
         );

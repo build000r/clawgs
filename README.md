@@ -352,6 +352,7 @@ target/release/clawgs demo extract --tool codex --max-actions 5 --max-task-chars
 | `CLAWGS_GROK_BIN` | Override the `grok` binary path |
 | `CLAWGS_GROK_WORKDIR` | Override the workdir passed to Grok headless mode |
 | `CLAWGS_GROK_MAX_TURNS` | Override Grok `--max-turns` for unattended headless calls |
+| `CLAWGS_GROK_CADENCE_MULTIPLIER` | Multiplies Grok's live thought cadence to reduce repeated headless cold-starts; defaults to `10`, set `1` for protocol cadence |
 | `CLAWGS_TMUX_BIN` | Override the `tmux` binary path |
 | `CLAWGS_TMUX_SOCKET` | Override the tmux notify socket path |
 

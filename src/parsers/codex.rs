@@ -149,7 +149,7 @@ fn user_response_item_text(payload: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|role| *role == "user")
         .and_then(|_| extract_user_input_text(payload))
-        .filter(|text| text.chars().count() < 1000 && !is_harness_markup(text))
+        .filter(|text| !is_harness_markup(text))
 }
 
 fn user_event_message_text(payload: &Value) -> Option<String> {
@@ -183,10 +183,10 @@ fn update_awaiting_user_state(
 ) {
     // Use a structural check rather than `user_task_text(...).is_some()`. The
     // task-text path filters out user turns whose content is markup-prefixed
-    // (e.g. `<system-reminder>...`), >=1000 chars, or whitespace-only — but
-    // those are still valid user turns that should clear the awaiting flag.
-    // Without this, an agent that finished a final-answer and then received a
-    // system-reminder-prefixed user reply would stay flagged as
+    // (e.g. `<system-reminder>...`) or whitespace-only — but those are still
+    // valid user turns that should clear the awaiting flag. Without this, an
+    // agent that finished a final-answer and then received a system-reminder-
+    // prefixed user reply would stay flagged as
     // `awaiting_user_input=true` and the engine would keep the session
     // Sleeping while it is actually back at work.
     if is_user_turn_entry(entry) || event_payload(entry, "turn_aborted").is_some() {
@@ -1026,7 +1026,7 @@ mod tests {
     }
 
     #[test]
-    fn user_response_item_text_rejects_exactly_1000_chars() {
+    fn user_response_item_text_accepts_exactly_1000_chars() {
         let payload = serde_json::json!({
             "role": "user",
             "content": [
@@ -1034,7 +1034,7 @@ mod tests {
             ]
         });
 
-        assert_eq!(user_response_item_text(&payload), None);
+        assert_eq!(user_response_item_text(&payload), Some("a".repeat(1000)));
     }
 
     #[test]
@@ -1187,19 +1187,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_codex_ignores_markup_and_oversized_user_inputs() {
+    fn parse_codex_ignores_markup_and_blank_user_inputs() {
         let file = NamedTempFile::new().expect("temp file");
-        let oversized = "a".repeat(1001);
         fs::write(
             file.path(),
-            format!(
-                concat!(
-                    "{{\"type\":\"response_item\",\"payload\":{{\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"<system>\"}}]}}}}\n",
-                    "{{\"type\":\"response_item\",\"payload\":{{\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"{oversized}\"}}]}}}}\n",
-                    "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"   \"}}}}\n",
-                    "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"Use the fallback task\"}}}}\n"
-                ),
-                oversized = oversized
+            concat!(
+                "{\"type\":\"response_item\",\"payload\":{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"<system>\"}]}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"   \"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Use the fallback task\"}}\n"
             ),
         )
         .expect("write fixture");
@@ -1207,6 +1202,25 @@ mod tests {
         let snapshot = parse(file.path(), &ExtractOptions::default()).expect("parse");
 
         assert_eq!(snapshot.user_task.as_deref(), Some("Use the fallback task"));
+    }
+
+    #[test]
+    fn parse_codex_truncates_oversized_response_item_user_task() {
+        let file = NamedTempFile::new().expect("temp file");
+        let oversized = "a".repeat(1500);
+        fs::write(
+            file.path(),
+            format!(
+                "{{\"type\":\"response_item\",\"payload\":{{\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"{oversized}\"}}]}}}}\n",
+                oversized = oversized
+            ),
+        )
+        .expect("write fixture");
+
+        let snapshot = parse(file.path(), &ExtractOptions::default()).expect("parse");
+
+        let expected = "a".repeat(ExtractOptions::default().max_task_chars);
+        assert_eq!(snapshot.user_task.as_deref(), Some(expected.as_str()));
     }
 
     #[test]

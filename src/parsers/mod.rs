@@ -1,7 +1,8 @@
 pub mod claude;
 pub mod codex;
 
-use std::fs;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -43,16 +44,8 @@ const RAW_EVENT_RING_CAP: usize = 20;
 
 #[cfg(test)]
 pub(crate) fn read_jsonl(path: &Path, include_raw: bool) -> Result<ParsedLines> {
-    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let bytes_read = bytes.len() as u64;
-
     let mut acc = JsonlAccumulator::new(include_raw);
-    for line in String::from_utf8_lossy(&bytes)
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-    {
-        acc.ingest(line);
-    }
+    let bytes_read = visit_jsonl_lines(path, |line| acc.ingest(line))?;
 
     Ok(acc.into_parsed_lines(bytes_read))
 }
@@ -62,18 +55,35 @@ pub(crate) fn visit_jsonl(
     include_raw: bool,
     mut visit: impl FnMut(&Value),
 ) -> Result<JsonlStats> {
-    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let bytes_read = bytes.len() as u64;
-
     let mut stats = JsonlStatsAccumulator::new(include_raw);
-    for line in String::from_utf8_lossy(&bytes)
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-    {
-        stats.ingest(line, &mut visit);
-    }
+    let bytes_read = visit_jsonl_lines(path, |line| stats.ingest(line, &mut visit))?;
 
     Ok(stats.into_stats(bytes_read))
+}
+
+fn visit_jsonl_lines(path: &Path, mut visit: impl FnMut(&str)) -> Result<u64> {
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut bytes_read = 0u64;
+    let mut line = Vec::new();
+
+    loop {
+        line.clear();
+        let read = reader
+            .read_until(b'\n', &mut line)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        bytes_read += read as u64;
+
+        let text = String::from_utf8_lossy(&line);
+        for jsonl_line in text.lines().filter(|line| !line.trim().is_empty()) {
+            visit(jsonl_line);
+        }
+    }
+
+    Ok(bytes_read)
 }
 
 #[cfg(test)]
@@ -267,6 +277,7 @@ fn date_time_string(value: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use tempfile::NamedTempFile;
 
     #[test]

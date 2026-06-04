@@ -1,10 +1,13 @@
 use std::ffi::OsString;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
 const OPENROUTER_TIMEOUT: Duration = Duration::from_secs(15);
 const OPENROUTER_CHAT_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
@@ -190,8 +193,7 @@ impl ModelClient for GrokCliModelClient {
 
 impl GrokCliModelClient {
     fn complete_once(&self, prompt: &str, model: &str) -> Result<String, String> {
-        fs::create_dir_all(&self.runtime_dir)
-            .map_err(|error| format!("failed to create {}: {error}", self.runtime_dir.display()))?;
+        ensure_private_runtime_dir(&self.runtime_dir)?;
 
         let stamp = unique_stamp();
         let prompt_path = self.runtime_dir.join(format!("{stamp}.prompt.txt"));
@@ -203,7 +205,7 @@ impl GrokCliModelClient {
             stderr_path.as_path(),
         ]);
 
-        fs::write(&prompt_path, prompt)
+        write_private_file(&prompt_path, prompt.as_bytes())
             .map_err(|error| format!("failed to write {}: {error}", prompt_path.display()))?;
 
         let output = run_subprocess_capturing(SubprocessSpec {
@@ -352,11 +354,58 @@ fn unique_stamp() -> String {
     )
 }
 
+#[cfg(unix)]
+fn ensure_private_runtime_dir(path: &Path) -> Result<(), String> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    builder.mode(0o700);
+    builder
+        .create(path)
+        .map_err(|error| format!("failed to create {}: {error}", path.display()))?;
+
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("failed to inspect {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!("refusing symlink runtime dir {}", path.display()));
+    }
+    if !metadata.is_dir() {
+        return Err(format!(
+            "runtime path is not a directory: {}",
+            path.display()
+        ));
+    }
+
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(path, permissions)
+        .map_err(|error| format!("failed to chmod {}: {error}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn ensure_private_runtime_dir(path: &Path) -> Result<(), String> {
+    fs::create_dir_all(path)
+        .map_err(|error| format!("failed to create {}: {error}", path.display()))
+}
+
+fn create_private_file(path: &Path) -> Result<File, String> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options
+        .open(path)
+        .map_err(|error| format!("failed to create {}: {error}", path.display()))
+}
+
+fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), String> {
+    let mut file = create_private_file(path)?;
+    file.write_all(contents)
+        .map_err(|error| format!("failed to write file: {error}"))
+}
+
 fn run_subprocess_capturing(spec: SubprocessSpec<'_>) -> Result<SubprocessOutput, String> {
-    let stdout_file = File::create(spec.stdout_path)
-        .map_err(|error| format!("failed to create {}: {error}", spec.stdout_path.display()))?;
-    let stderr_file = File::create(spec.stderr_path)
-        .map_err(|error| format!("failed to create {}: {error}", spec.stderr_path.display()))?;
+    let stdout_file = create_private_file(spec.stdout_path)?;
+    let stderr_file = create_private_file(spec.stderr_path)?;
 
     let mut command = Command::new(spec.bin);
     command.args(&spec.args);
@@ -916,6 +965,60 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn grok_runtime_paths_are_private_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Duration;
+        use tempfile::tempdir;
+
+        fn mode(path: &std::path::Path) -> u32 {
+            std::fs::metadata(path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let runtime_dir = dir.path().join("runtime");
+        super::ensure_private_runtime_dir(&runtime_dir).expect("runtime dir");
+        assert_eq!(mode(&runtime_dir), 0o700, "runtime dir must be private");
+
+        let prompt_path = runtime_dir.join("prompt.txt");
+        super::write_private_file(&prompt_path, b"status prompt").expect("prompt write");
+        assert_eq!(mode(&prompt_path), 0o600, "prompt file must be private");
+
+        let script = write_fake_backend(
+            dir.path(),
+            concat!(
+                "#!/bin/sh\n",
+                "printf 'backend stdout\\n'\n",
+                "printf 'backend stderr\\n' >&2\n",
+            ),
+        );
+        let stdout_path = runtime_dir.join("stdout.log");
+        let stderr_path = runtime_dir.join("stderr.log");
+        let script_bin = script.to_string_lossy().into_owned();
+
+        let output = run_subprocess_capturing(SubprocessSpec {
+            bin: &script_bin,
+            args: Vec::new(),
+            stdin_payload: b"",
+            stdout_path: &stdout_path,
+            stderr_path: &stderr_path,
+            timeout: Duration::from_secs(5),
+            label: "fake backend",
+        })
+        .expect("subprocess run");
+
+        assert!(output.success);
+        assert_eq!(output.stdout, "backend stdout\n");
+        assert_eq!(output.stderr, "backend stderr\n");
+        assert_eq!(mode(&stdout_path), 0o600, "stdout file must be private");
+        assert_eq!(mode(&stderr_path), 0o600, "stderr file must be private");
+    }
+
     #[test]
     fn command_available_probe_times_out() {
         use std::time::{Duration, Instant};
@@ -1044,6 +1147,8 @@ mod tests {
                 "  esac\n",
                 "done\n",
                 "test -f \"$prompt\" || exit 3\n",
+                "stat -c '%a' \"$(dirname \"$prompt\")\" > \"$(dirname \"$0\")/runtime.mode\"\n",
+                "stat -c '%a' \"$prompt\" > \"$(dirname \"$0\")/prompt.mode\"\n",
                 "grep -q 'status prompt' \"$prompt\" || exit 4\n",
                 "test \"$model\" = 'grok-test-model' || exit 5\n",
                 "printf '   grok ok   \\n'\n",
@@ -1061,6 +1166,21 @@ mod tests {
             .expect("complete should succeed");
 
         assert_eq!(out, "grok ok");
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("runtime.mode"))
+                    .expect("runtime mode")
+                    .trim(),
+                "700"
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("prompt.mode"))
+                    .expect("prompt mode")
+                    .trim(),
+                "600"
+            );
+        }
     }
 
     #[test]

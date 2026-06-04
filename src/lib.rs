@@ -330,19 +330,27 @@ pub(crate) fn action_cues_for_snapshot(
         cues.push(ActionCue::active(ActionCueKind::AwaitingUser));
     }
 
-    let Some(signal) = commit_signal else {
-        return cues;
-    };
-
-    if signal.candidate {
-        cues.push(ActionCue::active(ActionCueKind::CommitReady));
-    } else if signal.edited && !signal.validated && !signal.commit_seen {
-        cues.push(ActionCue::active(ActionCueKind::ValidationMissingAfterEdit));
-    } else if signal.edited && signal.validated && !signal.dirty_checked && !signal.commit_seen {
-        cues.push(ActionCue::active(ActionCueKind::DirtyCheckMissing));
+    if let Some(kind) = commit_signal.and_then(commit_signal_action_cue_kind) {
+        cues.push(ActionCue::active(kind));
     }
 
     cues
+}
+
+fn commit_signal_action_cue_kind(signal: &CommitSignal) -> Option<ActionCueKind> {
+    if signal.candidate {
+        return Some(ActionCueKind::CommitReady);
+    }
+
+    if !signal.edited || signal.commit_seen {
+        return None;
+    }
+
+    if !signal.validated {
+        return Some(ActionCueKind::ValidationMissingAfterEdit);
+    }
+
+    (!signal.dirty_checked).then_some(ActionCueKind::DirtyCheckMissing)
 }
 
 fn is_false(value: &bool) -> bool {

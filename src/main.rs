@@ -207,9 +207,28 @@ enum DemoToolArg {
 
 fn main() {
     if let Err(error) = run() {
+        if is_broken_pipe(&error) {
+            return;
+        }
         eprintln!("error: {error:#}");
         std::process::exit(1);
     }
+}
+
+fn is_broken_pipe(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        if cause
+            .downcast_ref::<io::Error>()
+            .is_some_and(|io_error| io_error.kind() == io::ErrorKind::BrokenPipe)
+        {
+            return true;
+        }
+
+        cause
+            .downcast_ref::<serde_json::Error>()
+            .and_then(serde_json::Error::io_error_kind)
+            .is_some_and(|kind| kind == io::ErrorKind::BrokenPipe)
+    })
 }
 
 fn run() -> Result<()> {
@@ -431,8 +450,7 @@ fn run_defaults() -> Result<()> {
         terminal_prompt: DEFAULT_TERMINAL_PREAMBLE,
     };
 
-    println!("{}", serde_json::to_string(&defaults)?);
-    Ok(())
+    print_json(&defaults, false)
 }
 
 fn validate_extract_limits(
@@ -462,11 +480,14 @@ fn validate_tmux_emit_args(args: &TmuxEmitArgs) -> Result<()> {
 }
 
 fn print_json<T: Serialize>(value: &T, pretty: bool) -> Result<()> {
+    let mut stdout = io::stdout().lock();
     if pretty {
-        println!("{}", serde_json::to_string_pretty(value)?);
+        serde_json::to_writer_pretty(&mut stdout, value)
+            .context("failed to write JSON response")?;
     } else {
-        println!("{}", serde_json::to_string(value)?);
+        serde_json::to_writer(&mut stdout, value).context("failed to write JSON response")?;
     }
+    writeln!(stdout).context("failed to write JSON response")?;
     Ok(())
 }
 

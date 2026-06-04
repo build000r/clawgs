@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use serde_json::Value;
 use tempfile::TempDir;
@@ -126,6 +126,48 @@ fn demo_emit_outputs_canonical_exchange_without_backends() {
     assert_eq!(
         json["response"]["updates"][0]["action_cues"],
         serde_json::json!([expected_cue])
+    );
+}
+
+#[test]
+fn demo_emit_exits_cleanly_when_pipe_reader_closes() {
+    let home = TempDir::new().expect("temp home");
+    let cwd = TempDir::new().expect("temp cwd");
+    let mut clawgs = Command::new(env!("CARGO_BIN_EXE_clawgs"))
+        .arg("demo")
+        .arg("emit")
+        .arg("--pretty")
+        .current_dir(cwd.path())
+        .env("HOME", home.path())
+        .env("CLAWGS_MODEL_BACKEND", "openrouter")
+        .env_remove("OPENROUTER_API_KEY")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn clawgs demo emit");
+
+    let stdout = clawgs.stdout.take().expect("stdout should be piped");
+    let head = Command::new("head")
+        .arg("-n")
+        .arg("1")
+        .stdin(Stdio::from(stdout))
+        .output()
+        .expect("failed to run head");
+
+    assert!(head.status.success(), "head should read one line");
+
+    let output = clawgs
+        .wait_with_output()
+        .expect("failed to wait for clawgs");
+    assert!(
+        output.status.success(),
+        "command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "broken pipe should not print stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

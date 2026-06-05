@@ -61,6 +61,20 @@ pub(crate) fn visit_jsonl(
     Ok(stats.into_stats(bytes_read))
 }
 
+pub(crate) fn visit_jsonl_str(
+    input: &str,
+    include_raw: bool,
+    mut visit: impl FnMut(&Value),
+) -> Result<JsonlStats> {
+    let mut stats = JsonlStatsAccumulator::new(include_raw);
+
+    for jsonl_line in input.lines().filter(|line| !line.trim().is_empty()) {
+        stats.ingest(jsonl_line, &mut visit);
+    }
+
+    Ok(stats.into_stats(input.len() as u64))
+}
+
 fn visit_jsonl_lines(path: &Path, mut visit: impl FnMut(&str)) -> Result<u64> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut reader = BufReader::new(file);
@@ -327,6 +341,34 @@ mod tests {
         let mut visited = Vec::new();
         let stats = visit_jsonl(file.path(), true, |value| visited.push(value.clone()))
             .expect("visit jsonl");
+
+        assert_eq!(
+            visited,
+            vec![
+                serde_json::json!({"type": "a"}),
+                serde_json::json!(42),
+                serde_json::json!({"type": "b"}),
+            ]
+        );
+        assert_eq!(stats.events_seen, 3);
+        assert_eq!(stats.malformed_lines_skipped, 1);
+        assert_eq!(stats.bytes_read, input.len() as u64);
+        assert_eq!(
+            stats.raw_events,
+            Some(vec![
+                serde_json::json!({"type": "a"}),
+                serde_json::json!({"type": "b"}),
+            ])
+        );
+    }
+
+    #[test]
+    fn visit_jsonl_str_streams_entries_and_preserves_stats() {
+        let input = "{\"type\":\"a\"}\nnot-json\n42\n{\"type\":\"b\"}\n";
+
+        let mut visited = Vec::new();
+        let stats = visit_jsonl_str(input, true, |value| visited.push(value.clone()))
+            .expect("visit jsonl string");
 
         assert_eq!(
             visited,

@@ -289,14 +289,52 @@ pub fn extract(
         AgentTool::Claude => parsers::claude::parse(path, options)?,
         AgentTool::Codex => parsers::codex::parse(path, options)?,
     };
+    Ok(extract_output(
+        tool,
+        path.display().to_string(),
+        cwd,
+        discovered,
+        parsed,
+    ))
+}
+
+pub fn extract_jsonl_str(
+    tool: AgentTool,
+    source_path: &str,
+    input: &str,
+    cwd: &Path,
+    discovered: bool,
+    options: &ExtractOptions,
+) -> Result<ExtractOutput> {
+    let parsed: ParseSnapshot = match tool {
+        AgentTool::Claude => parsers::claude::parse_str(input, options)?,
+        AgentTool::Codex => parsers::codex::parse_str(input, options)?,
+    };
+
+    Ok(extract_output(
+        tool,
+        source_path.to_string(),
+        cwd,
+        discovered,
+        parsed,
+    ))
+}
+
+fn extract_output(
+    tool: AgentTool,
+    source_path: String,
+    cwd: &Path,
+    discovered: bool,
+    parsed: ParseSnapshot,
+) -> ExtractOutput {
     let action_cues =
         action_cues_for_snapshot(parsed.commit_signal.as_ref(), parsed.awaiting_user_input);
 
-    Ok(ExtractOutput {
+    ExtractOutput {
         schema_version: SCHEMA_VERSION.to_string(),
         source: Source {
             tool: tool.as_str().to_string(),
-            path: path.display().to_string(),
+            path: source_path,
             discovered,
             cwd: cwd.display().to_string(),
         },
@@ -317,7 +355,7 @@ pub fn extract(
         },
         generated_at: Utc::now().to_rfc3339(),
         raw_events: parsed.raw_events,
-    })
+    }
 }
 
 pub(crate) fn action_cues_for_snapshot(
@@ -737,6 +775,34 @@ mod tests {
 
         let tool = infer_tool_from_file(file.path()).expect("infer tool");
         assert_eq!(tool, AgentTool::Claude);
+    }
+
+    #[test]
+    fn extract_jsonl_str_uses_virtual_source_and_preserves_stats() {
+        let input = concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/demo\"}}\n",
+            "not-json\n",
+            "{\"type\":\"response_item\",\"payload\":{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Build a parser\"}]}}\n"
+        );
+
+        let output = extract_jsonl_str(
+            AgentTool::Codex,
+            "embedded:test.jsonl",
+            input,
+            std::path::Path::new("/demo"),
+            false,
+            &ExtractOptions::default(),
+        )
+        .expect("extract from string");
+
+        assert_eq!(output.source.tool, "codex");
+        assert_eq!(output.source.path, "embedded:test.jsonl");
+        assert!(!output.source.discovered);
+        assert_eq!(output.source.cwd, "/demo");
+        assert_eq!(output.snapshot.user_task.as_deref(), Some("Build a parser"));
+        assert_eq!(output.stats.events_seen, 2);
+        assert_eq!(output.stats.malformed_lines_skipped, 1);
+        assert_eq!(output.stats.bytes_read, input.len() as u64);
     }
 
     #[test]

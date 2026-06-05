@@ -5,49 +5,82 @@ use serde_json::Value;
 
 use super::{
     extract_timestamp, extract_tool_detail, is_harness_markup, push_action, truncate, visit_jsonl,
-    ParseSnapshot,
+    visit_jsonl_str, JsonlStats, ParseSnapshot,
 };
 use crate::{Action, ExtractOptions};
 
 pub(crate) fn parse(path: &Path, options: &ExtractOptions) -> Result<ParseSnapshot> {
-    let mut user_task: Option<String> = None;
-    let mut recent_actions: Vec<Action> = Vec::new();
-    let mut current_tool: Option<Action> = None;
-    let mut token_count = 0u64;
-    let mut awaiting_user_input = false;
-    let mut awaiting_user_text: Option<String> = None;
-
+    let mut state = ClaudeParseState::new();
     let stats = visit_jsonl(path, options.include_raw, |entry| {
+        state.ingest(entry, options);
+    })?;
+
+    Ok(state.into_snapshot(stats))
+}
+
+pub(crate) fn parse_str(input: &str, options: &ExtractOptions) -> Result<ParseSnapshot> {
+    let mut state = ClaudeParseState::new();
+    let stats = visit_jsonl_str(input, options.include_raw, |entry| {
+        state.ingest(entry, options);
+    })?;
+
+    Ok(state.into_snapshot(stats))
+}
+
+struct ClaudeParseState {
+    user_task: Option<String>,
+    recent_actions: Vec<Action>,
+    current_tool: Option<Action>,
+    token_count: u64,
+    awaiting_user_input: bool,
+    awaiting_user_text: Option<String>,
+}
+
+impl ClaudeParseState {
+    fn new() -> Self {
+        Self {
+            user_task: None,
+            recent_actions: Vec::new(),
+            current_tool: None,
+            token_count: 0,
+            awaiting_user_input: false,
+            awaiting_user_text: None,
+        }
+    }
+
+    fn ingest(&mut self, entry: &Value, options: &ExtractOptions) {
         let ts = extract_timestamp(entry);
-        update_user_task(entry, options, &mut user_task);
-        update_token_count(entry, &mut token_count);
+        update_user_task(entry, options, &mut self.user_task);
+        update_token_count(entry, &mut self.token_count);
         update_awaiting_user_state(
             entry,
             options,
-            &mut awaiting_user_input,
-            &mut awaiting_user_text,
+            &mut self.awaiting_user_input,
+            &mut self.awaiting_user_text,
         );
         record_actions(
-            &mut recent_actions,
-            &mut current_tool,
+            &mut self.recent_actions,
+            &mut self.current_tool,
             assistant_actions(entry, options, &ts),
             options.max_actions,
         );
-    })?;
+    }
 
-    Ok(ParseSnapshot {
-        user_task,
-        recent_actions,
-        current_tool,
-        token_count,
-        awaiting_user_input,
-        awaiting_user_text,
-        commit_signal: None,
-        events_seen: stats.events_seen,
-        malformed_lines_skipped: stats.malformed_lines_skipped,
-        bytes_read: stats.bytes_read,
-        raw_events: stats.raw_events,
-    })
+    fn into_snapshot(self, stats: JsonlStats) -> ParseSnapshot {
+        ParseSnapshot {
+            user_task: self.user_task,
+            recent_actions: self.recent_actions,
+            current_tool: self.current_tool,
+            token_count: self.token_count,
+            awaiting_user_input: self.awaiting_user_input,
+            awaiting_user_text: self.awaiting_user_text,
+            commit_signal: None,
+            events_seen: stats.events_seen,
+            malformed_lines_skipped: stats.malformed_lines_skipped,
+            bytes_read: stats.bytes_read,
+            raw_events: stats.raw_events,
+        }
+    }
 }
 
 fn entry_type(entry: &Value) -> &str {

@@ -26,6 +26,10 @@ fn expected(name: &str) -> Value {
         "demo_extract_codex" => include_str!("goldens/demo_extract_codex.normalized.json"),
         "demo_extract_claude" => include_str!("goldens/demo_extract_claude.normalized.json"),
         "extract_codex_fixture" => include_str!("goldens/extract_codex_fixture.normalized.json"),
+        "extract_claude_fixture" => include_str!("goldens/extract_claude_fixture.normalized.json"),
+        "extract_codex_current_fixture" => {
+            include_str!("goldens/extract_codex_current_fixture.normalized.json")
+        }
         _ => panic!("unknown golden {name}"),
     };
     serde_json::from_str(raw).expect("golden json")
@@ -91,5 +95,39 @@ fn fixture_extract_codex_matches_golden_contract() {
             "--pretty",
         ]),
         expected("extract_codex_fixture")
+    );
+}
+
+#[test]
+fn fixture_extract_claude_matches_golden_contract() {
+    assert_eq!(
+        run_clawgs(&[
+            "extract",
+            "--tool",
+            "claude",
+            "--cwd",
+            "/schema-sync/project",
+            "--input",
+            "tests/fixtures/claude-sample.jsonl",
+            "--pretty",
+        ]),
+        expected("extract_claude_fixture")
+    );
+}
+
+#[test]
+fn fixture_extract_codex_current_matches_golden_contract() {
+    assert_eq!(
+        run_clawgs(&[
+            "extract",
+            "--tool",
+            "codex",
+            "--cwd",
+            "/tmp/project",
+            "--input",
+            "tests/fixtures/codex-current.jsonl",
+            "--pretty",
+        ]),
+        expected("extract_codex_current_fixture")
     );
 }

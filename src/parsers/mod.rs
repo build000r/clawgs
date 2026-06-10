@@ -1,3 +1,5 @@
+//! Claude Code and Codex JSONL transcript parsers.
+
 pub mod claude;
 pub mod codex;
 

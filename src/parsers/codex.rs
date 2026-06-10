@@ -1,3 +1,5 @@
+//! Codex JSONL transcript parser.
+
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 

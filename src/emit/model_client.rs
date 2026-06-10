@@ -1,3 +1,5 @@
+//! Model backend clients (OpenRouter, Grok) for live thought generation.
+
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;

@@ -1,3 +1,5 @@
+//! Claude Code JSONL transcript parser.
+
 use std::path::Path;
 
 use anyhow::Result;

@@ -1,3 +1,5 @@
+//! Tmux pane listing, capture, and conversion into emit protocol session snapshots.
+
 use std::collections::{HashMap, HashSet};
 use std::process::Command;
 

@@ -99,11 +99,37 @@ target/release/clawgs claude-hook-notify --socket "$HOME/.tmux/clawgs-tmux.sock"
 Use [references/claude-code-hooks.json](references/claude-code-hooks.json) as a
 copyable settings snippet.
 
+## Defaults
+
+Print resolved daemon defaults (model, backend, prompts) as JSON:
+
+```bash
+target/release/clawgs defaults
+target/release/clawgs defaults --pretty
+```
+
+## Library Usage (Rust Dependency)
+
+Add `clawgs = "0.3"` to `Cargo.toml` and call `extract_jsonl_str` directly:
+
+```rust
+use clawgs::{AgentTool, ExtractOptions, extract_jsonl_str};
+
+let output = extract_jsonl_str(
+    AgentTool::Codex, "inline", jsonl_str,
+    std::path::Path::new(cwd), false, &ExtractOptions::default(),
+).unwrap();
+```
+
+Core output types (`ExtractOutput`, `Snapshot`, `Action`, `Source`, `Stats`,
+`CommitSignal`) derive both `Serialize` and `Deserialize`, so saved `clawgs.v2`
+JSON can be parsed back into typed Rust structs.
+
 ## Useful Flags
 
 - `--input <path>`: parse a specific JSONL file instead of discovery
 - `--tool <claude|codex|auto>`: force or infer source format
-- `--pretty`: pretty-print JSON output
+- `--pretty`: pretty-print JSON output (works on `extract`, `demo extract`, `demo emit`, `defaults`)
 - `--include-raw`: include raw parsed event excerpts for debugging
 - `--max-actions`, `--max-task-chars`, `--max-detail-chars`: output size controls
 
@@ -122,8 +148,9 @@ Schema version is `clawgs.v2`. Full field definitions and sample output are in [
 Current crate release target: `0.3.0`.
 
 - `0.2.0` is the canonical published `clawgs.v2` / `clawgs.emit.v2` schema and protocol release.
-- `0.3.0` is the current unreleased target for the Grok live backend, Claude
-  Code hook wake-up bridge, `session_deltas`, transcript-discovery hardening,
-  and opt-in live tmux smoke.
+- `0.3.0` is the current unreleased target: Grok live backend, Claude Code hook
+  wake-up bridge, `session_deltas`, transcript-discovery hardening, opt-in live
+  tmux smoke, CI workflow, `Deserialize` on core output types, library API docs,
+  `defaults --pretty`, and 77 dependency updates.
 - Release history is tracked in [CHANGELOG.md](CHANGELOG.md).
 - Tag and crates.io publish steps are tracked in [RELEASE.md](RELEASE.md).

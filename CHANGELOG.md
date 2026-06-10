@@ -33,6 +33,8 @@ delta facts, and Claude Code hook wake-ups explicit.
 - Added no-credentials stdio tests proving missing backend credentials are
   reported as `sync_result.metrics.last_backend_error` instead of daemon
   process failures.
+- Restricted runtime prompt permissions for the Grok headless backend.
+- Throttled repeated Grok narration to reduce redundant headless cold-starts.
 
 ### Emit Protocol And Discovery
 
@@ -47,6 +49,11 @@ delta facts, and Claude Code hook wake-ups explicit.
   duplicate-session exclusion fallback, and scan bounds.
 - Added checked-in golden contract fixtures for demo emit/extract and fixture
   extraction output.
+- Streamed JSONL reads to avoid loading entire transcripts into memory.
+- Kept long Codex user tasks that previously truncated prematurely.
+- Bounded `awaiting_user_text` to `max_task_chars` to prevent unbounded
+  snapshot fields.
+- Applied harness-markup redaction uniformly across public-snapshot text fields.
 
 ### Hooks And Local Integration
 
@@ -66,8 +73,12 @@ delta facts, and Claude Code hook wake-ups explicit.
 - Expanded package exclusions and release workflow package checks for local
   operator state such as `.beads/`, `.mcp.json`, `.claude/`, `.codex/`, backup
   files, and `.env` files.
+- Excluded `memory/`, `diagrams/`, and `AGENTS.md` from the published crate
+  package so operator-internal artifacts do not ship to crates.io users.
 - Added `scripts/check.sh` coverage for the `defaults` command in addition to
   help and fixture extraction.
+- Handled broken stdout pipes gracefully so piped output (e.g. `clawgs extract |
+  head`) exits cleanly instead of printing an error.
 
 ### Packaging And Install
 
@@ -79,6 +90,24 @@ delta facts, and Claude Code hook wake-ups explicit.
 - Added [`docs/INSTALL.md`](docs/INSTALL.md): a checked-in, sanitized
   clean-install proof covering `cargo install --path . --locked` and the
   zero-config `demo extract` / `demo emit` flows.
+
+### Documentation
+
+- Added crate-level `//!` documentation with a working doc-test for
+  `extract_jsonl_str`, giving docs.rs a meaningful landing page with an inline
+  usage example.
+
+### Performance
+
+- Parsed embedded demo transcripts in memory instead of writing temporary files,
+  removing filesystem I/O from `demo extract`.
+- Simplified action cue selection to a direct match instead of iterating
+  candidate lists.
+
+### Downstream Contracts
+
+- Added a `downstream_swimmers_contract` integration test smoking the extract
+  and emit entry points that Swimmers depends on.
 
 ## [0.2.0] - 2026-05-06
 

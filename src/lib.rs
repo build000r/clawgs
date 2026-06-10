@@ -268,6 +268,7 @@ pub struct Stats {
     pub bytes_read: u64,
 }
 
+/// The full `clawgs.v2` extraction result: source metadata, normalized snapshot, and parse stats.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExtractOutput {
     pub schema_version: String,
@@ -279,6 +280,7 @@ pub struct ExtractOutput {
     pub raw_events: Option<Vec<Value>>,
 }
 
+/// A transcript file resolved by discovery or explicit `--input` path.
 #[derive(Debug, Clone)]
 pub struct ResolvedInput {
     pub tool: AgentTool,
@@ -286,6 +288,7 @@ pub struct ResolvedInput {
     pub discovered: bool,
 }
 
+/// Resolve a transcript file from an explicit path or by discovery under `cwd`.
 pub fn resolve_input(
     selection: ToolSelection,
     cwd: &Path,
@@ -314,6 +317,7 @@ pub fn resolve_input(
     Ok(resolved)
 }
 
+/// Parse a JSONL transcript file into a `clawgs.v2` [`ExtractOutput`].
 pub fn extract(
     tool: AgentTool,
     path: &Path,
@@ -334,6 +338,7 @@ pub fn extract(
     ))
 }
 
+/// Parse a JSONL string in memory into a `clawgs.v2` [`ExtractOutput`].
 pub fn extract_jsonl_str(
     tool: AgentTool,
     source_path: &str,
@@ -431,6 +436,7 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// Read the first 40 lines of a JSONL file and infer whether it is a Claude or Codex transcript.
 pub fn infer_tool_from_file(path: &Path) -> Result<AgentTool> {
     let file = fs::File::open(path).with_context(|| {
         format!(
@@ -460,6 +466,7 @@ pub fn infer_tool_from_file(path: &Path) -> Result<AgentTool> {
     ))
 }
 
+/// Discover the newest transcript for `tool` under the default log directory for `cwd`.
 pub fn discover_for_tool(cwd: &Path, tool: AgentTool) -> Result<ResolvedInput> {
     discovered_path_for_tool(cwd, tool)
         .map(|path| discovered_input(tool, path))
@@ -473,6 +480,7 @@ pub fn discover_for_tool(cwd: &Path, tool: AgentTool) -> Result<ResolvedInput> {
         })
 }
 
+/// Auto-discover the newest Claude or Codex transcript matching `cwd`.
 pub fn discover_auto(cwd: &Path) -> Result<ResolvedInput> {
     match (discover_claude_path(cwd), discover_codex_path(cwd)) {
         (Some(path), None) => Ok(discovered_input(AgentTool::Claude, path)),
@@ -487,10 +495,12 @@ pub fn discover_auto(cwd: &Path) -> Result<ResolvedInput> {
     }
 }
 
+/// Return the newest Claude transcript path for `cwd`, if any.
 pub fn discover_claude_path(cwd: &Path) -> Option<PathBuf> {
     discover_claude_paths(cwd).into_iter().next()
 }
 
+/// Return all Claude transcript paths for `cwd`, newest first.
 pub fn discover_claude_paths(cwd: &Path) -> Vec<PathBuf> {
     let Some(home) = home_dir() else {
         return Vec::new();
@@ -519,10 +529,12 @@ pub fn discover_claude_paths(cwd: &Path) -> Vec<PathBuf> {
     files.into_iter().map(|(path, _)| path).collect()
 }
 
+/// Return the newest Codex transcript path for `cwd`, if any.
 pub fn discover_codex_path(cwd: &Path) -> Option<PathBuf> {
     discover_codex_paths(cwd).into_iter().next()
 }
 
+/// Return all Codex transcript paths for `cwd`, newest first.
 pub fn discover_codex_paths(cwd: &Path) -> Vec<PathBuf> {
     let Some(home) = home_dir() else {
         return Vec::new();
@@ -534,6 +546,7 @@ pub fn discover_codex_paths(cwd: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Like [`discover_claude_path`] but skips paths in `excluded` (used by tmux-emit to avoid reusing claimed transcripts).
 pub fn discover_claude_path_excluding(cwd: &Path, excluded: &HashSet<PathBuf>) -> Option<PathBuf> {
     discover_claude_paths(cwd)
         .into_iter()
@@ -547,6 +560,7 @@ fn claude_file_matches_cwd(path: &Path, cwd: &Path) -> bool {
         .is_some_and(|reader| reader_matches_or_lacks_cwd(reader, &cwd.display().to_string()))
 }
 
+/// Like [`discover_codex_path`] but skips paths in `excluded`.
 pub fn discover_codex_path_excluding(cwd: &Path, excluded: &HashSet<PathBuf>) -> Option<PathBuf> {
     discover_codex_paths(cwd)
         .into_iter()

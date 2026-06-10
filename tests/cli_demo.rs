@@ -194,10 +194,7 @@ fn demo_extract_preserves_limit_validation() {
 fn run_defaults(args: &[&str]) -> std::process::Output {
     let home = TempDir::new().expect("temp home");
     let mut command = Command::new(env!("CARGO_BIN_EXE_clawgs"));
-    command
-        .arg("defaults")
-        .args(args)
-        .env("HOME", home.path());
+    command.arg("defaults").args(args).env("HOME", home.path());
     command.output().expect("failed to run clawgs defaults")
 }
 
@@ -208,7 +205,10 @@ fn defaults_outputs_valid_json_with_expected_fields() {
     let json: Value = serde_json::from_slice(&output.stdout).expect("valid json");
     assert!(json.get("backend").is_some(), "missing backend field");
     assert!(json.get("agent_prompt").is_some(), "missing agent_prompt");
-    assert!(json.get("terminal_prompt").is_some(), "missing terminal_prompt");
+    assert!(
+        json.get("terminal_prompt").is_some(),
+        "missing terminal_prompt"
+    );
     assert!(json.get("model").is_some(), "missing model field");
 }
 

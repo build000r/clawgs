@@ -91,11 +91,45 @@ delta facts, and Claude Code hook wake-ups explicit.
   clean-install proof covering `cargo install --path . --locked` and the
   zero-config `demo extract` / `demo emit` flows.
 
+### CI
+
+- Added a GitHub Actions CI workflow running `fmt --check`, `clippy`, `test
+  --locked`, and `build --release --locked` on push to `main` and on pull
+  requests.
+- Added `Swatinem/rust-cache@v2` to both CI and release workflows for faster
+  dependency builds.
+- Added forbidden-package patterns to the release workflow so `memory/`,
+  `diagrams/`, and `AGENTS.md` are caught before publish.
+
 ### Documentation
 
 - Added crate-level `//!` documentation with a working doc-test for
   `extract_jsonl_str`, giving docs.rs a meaningful landing page with an inline
   usage example.
+- Added `///` doc comments to all 13 public functions and types in the library
+  API (`ExtractOutput`, `ResolvedInput`, `resolve_input`, `extract`,
+  `extract_jsonl_str`, `infer_tool_from_file`, `discover_for_tool`,
+  `discover_auto`, `discover_claude_path`, `discover_claude_paths`,
+  `discover_codex_path`, `discover_codex_paths`, and exclusion variants).
+- Added `//!` module-level doc comments to all public modules (`emit`,
+  `emit::protocol`, `emit::engine`, `emit::model_client`, `parsers`,
+  `parsers::claude`, `parsers::codex`, `tmux`).
+- Added CI status badge to `README.md`.
+
+### Library API
+
+- Derived `Deserialize` on six core output types (`Action`, `CommitSignal`,
+  `Snapshot`, `Source`, `Stats`, `ExtractOutput`) with `#[serde(default)]` on
+  optional fields, so downstream consumers can parse saved `clawgs.v2` JSON back
+  into typed Rust structs.
+- Added a `extract_output_roundtrips_through_json` test proving serialize →
+  deserialize fidelity.
+- Added `--pretty` flag to the `defaults` command with integration tests.
+
+### Dependencies
+
+- Updated 77 `Cargo.lock` dependencies to latest compatible versions (chrono
+  0.4.45, clap 4.6.1, hyper 1.10.1, reqwest 0.12.28, anstream 1.0.0).
 
 ### Performance
 

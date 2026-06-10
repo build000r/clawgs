@@ -114,7 +114,15 @@ delta facts, and Claude Code hook wake-ups explicit.
 - Added `//!` module-level doc comments to all public modules (`emit`,
   `emit::protocol`, `emit::engine`, `emit::model_client`, `parsers`,
   `parsers::claude`, `parsers::codex`, `tmux`).
+- Added field-level `///` doc comments to every public struct field, enum
+  variant, and method in `lib.rs`.
+- Added `#![warn(missing_docs)]` to the crate root so undocumented public API
+  additions produce compiler warnings.
 - Added CI status badge to `README.md`.
+- Added Library Usage section to `README.md` with `extract_jsonl_str` and
+  `Deserialize` round-trip examples.
+- Updated `SKILL.md` with the `defaults` command, library usage as a Rust
+  dependency, `Deserialize` support, and refreshed `0.3.0` scope description.
 
 ### Library API
 
@@ -142,6 +150,9 @@ delta facts, and Claude Code hook wake-ups explicit.
 
 - Added a `downstream_swimmers_contract` integration test smoking the extract
   and emit entry points that Swimmers depends on.
+- Added golden contract tests for the Claude fixture and the `codex-current`
+  fixture (with action cues and commit signals), bringing golden coverage from
+  4 to 6 contracts.
 
 ## [0.2.0] - 2026-05-06
 

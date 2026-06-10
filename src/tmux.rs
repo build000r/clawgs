@@ -1,4 +1,5 @@
 //! Tmux pane listing, capture, and conversion into emit protocol session snapshots.
+#![allow(missing_docs)]
 
 use std::collections::{HashMap, HashSet};
 use std::process::Command;

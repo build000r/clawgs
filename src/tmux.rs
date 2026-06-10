@@ -207,7 +207,35 @@ fn list_tmux_panes(tmux_bin: &str) -> Result<String> {
         );
     }
 
-    String::from_utf8(output.stdout).context("tmux list-panes output was not UTF-8")
+    let raw = String::from_utf8(output.stdout).context("tmux list-panes output was not UTF-8")?;
+    Ok(unescape_tmux_octal(&raw))
+}
+
+/// tmux 3.4+ escapes control characters in format output as `\NNN` octal
+/// sequences. Restore the raw bytes so the field separator is a single `\x1f`
+/// regardless of tmux version.
+fn unescape_tmux_octal(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 3 < bytes.len() {
+            if let Some(byte) = parse_octal_triple(bytes[i + 1], bytes[i + 2], bytes[i + 3]) {
+                result.push(byte as char);
+                i += 4;
+                continue;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+fn parse_octal_triple(a: u8, b: u8, c: u8) -> Option<u8> {
+    let digit = |d: u8| -> Option<u8> { (b'0'..=b'7').contains(&d).then(|| d - b'0') };
+    let val = digit(a)? * 64 + digit(b)? * 8 + digit(c)?;
+    Some(val)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -790,5 +818,38 @@ mod tests {
         assert!(exited[0].exited);
         assert_eq!(exited[0].rest_state, RestState::DeepSleep);
         assert_eq!(exited[0].tool.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn unescape_tmux_octal_restores_field_separator() {
+        let escaped = "work\\0370\\0370\\037%0\\037/tmp/project\\037bash\\0370";
+        let unescaped = unescape_tmux_octal(escaped);
+        assert_eq!(
+            unescaped,
+            "work\u{1f}0\u{1f}0\u{1f}%0\u{1f}/tmp/project\u{1f}bash\u{1f}0"
+        );
+    }
+
+    #[test]
+    fn unescape_tmux_octal_passes_through_raw_bytes() {
+        let raw = "work\u{1f}0\u{1f}0\u{1f}%0\u{1f}/tmp/project\u{1f}bash\u{1f}0";
+        assert_eq!(unescape_tmux_octal(raw), raw);
+    }
+
+    #[test]
+    fn unescape_tmux_octal_handles_non_octal_backslashes() {
+        assert_eq!(unescape_tmux_octal("path\\nname"), "path\\nname");
+        assert_eq!(unescape_tmux_octal("trailing\\"), "trailing\\");
+        assert_eq!(unescape_tmux_octal("short\\01"), "short\\01");
+    }
+
+    #[test]
+    fn parse_pane_line_handles_tmux34_escaped_output() {
+        let escaped = "work\\0370\\0370\\037%3\\037/tmp/project\\037codex\\0370";
+        let unescaped = unescape_tmux_octal(escaped);
+        let parsed = parse_pane_line(&unescaped).expect("pane meta");
+        assert_eq!(parsed.session_name, "work");
+        assert_eq!(parsed.pane_id, "%3");
+        assert_eq!(parsed.current_command, "codex");
     }
 }

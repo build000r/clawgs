@@ -46,7 +46,14 @@ enum Commands {
     /// Read Claude Code hook JSON from stdin and wake a running `tmux-emit` daemon without blocking Claude.
     ClaudeHookNotify(ClaudeHookNotifyArgs),
     /// Print resolved daemon defaults as JSON.
-    Defaults,
+    Defaults(DefaultsArgs),
+}
+
+#[derive(Debug, Args)]
+struct DefaultsArgs {
+    /// Pretty-print the JSON output (default: single-line compact).
+    #[arg(long)]
+    pretty: bool,
 }
 
 #[derive(Debug, Args)]
@@ -240,7 +247,7 @@ fn run() -> Result<()> {
         Commands::TmuxEmit(args) => run_tmux_emit(args),
         Commands::TmuxNotify(args) => run_tmux_notify(args),
         Commands::ClaudeHookNotify(args) => run_claude_hook_notify(args),
-        Commands::Defaults => run_defaults(),
+        Commands::Defaults(args) => run_defaults(args),
     }
 }
 
@@ -431,7 +438,7 @@ impl EmitLineResult {
     }
 }
 
-fn run_defaults() -> Result<()> {
+fn run_defaults(args: DefaultsArgs) -> Result<()> {
     let backend = resolve_model_backend();
     let model = default_model_for_backend(backend);
 
@@ -450,7 +457,7 @@ fn run_defaults() -> Result<()> {
         terminal_prompt: DEFAULT_TERMINAL_PREAMBLE,
     };
 
-    print_json(&defaults, false)
+    print_json(&defaults, args.pretty)
 }
 
 fn validate_extract_limits(

@@ -190,3 +190,34 @@ fn demo_extract_preserves_limit_validation() {
     let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
     assert!(stderr.contains("--max-actions must be greater than 0"));
 }
+
+fn run_defaults(args: &[&str]) -> std::process::Output {
+    let home = TempDir::new().expect("temp home");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_clawgs"));
+    command
+        .arg("defaults")
+        .args(args)
+        .env("HOME", home.path());
+    command.output().expect("failed to run clawgs defaults")
+}
+
+#[test]
+fn defaults_outputs_valid_json_with_expected_fields() {
+    let output = run_defaults(&[]);
+    assert!(output.status.success());
+    let json: Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert!(json.get("backend").is_some(), "missing backend field");
+    assert!(json.get("agent_prompt").is_some(), "missing agent_prompt");
+    assert!(json.get("terminal_prompt").is_some(), "missing terminal_prompt");
+    assert!(json.get("model").is_some(), "missing model field");
+}
+
+#[test]
+fn defaults_pretty_outputs_multiline_json() {
+    let output = run_defaults(&["--pretty"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("utf8");
+    assert!(stdout.contains('\n'), "pretty output should be multiline");
+    let json: Value = serde_json::from_str(&stdout).expect("valid json");
+    assert!(json.get("backend").is_some());
+}

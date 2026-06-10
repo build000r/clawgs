@@ -1,3 +1,39 @@
+//! Normalize Claude Code and Codex JSONL transcripts into stable
+//! [`clawgs.v2`](https://github.com/build000r/clawgs/blob/main/references/schema-v2.md)
+//! JSON snapshots.
+//!
+//! # Library usage
+//!
+//! Parse a JSONL string into a structured [`ExtractOutput`]:
+//!
+//! ```
+//! use std::path::Path;
+//! use clawgs::{AgentTool, ExtractOptions, extract_jsonl_str};
+//!
+//! let jsonl = r#"{"type":"session_meta","payload":{"cwd":"/tmp/project"}}
+//! {"type":"event_msg","payload":{"type":"user_message","message":"Build a parser"}}
+//! {"type":"response","payload":{"usage":{"input_tokens":500}}}
+//! "#;
+//!
+//! let output = extract_jsonl_str(
+//!     AgentTool::Codex,
+//!     "inline",
+//!     jsonl,
+//!     Path::new("/tmp/project"),
+//!     false,
+//!     &ExtractOptions::default(),
+//! ).unwrap();
+//!
+//! assert_eq!(output.schema_version, "clawgs.v2");
+//! assert_eq!(output.snapshot.user_task.as_deref(), Some("Build a parser"));
+//! assert!(output.stats.events_seen > 0);
+//! ```
+//!
+//! # CLI
+//!
+//! The `clawgs` binary exposes the same functionality via subcommands. See the
+//! [README](https://github.com/build000r/clawgs) for CLI usage.
+
 pub mod emit;
 pub mod parsers;
 pub mod tmux;

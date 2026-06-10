@@ -94,17 +94,17 @@ impl Default for ExtractOptions {
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Action {
     pub tool: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     pub kind: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ts: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommitSignal {
     pub candidate: bool,
     pub edited: bool,
@@ -235,25 +235,26 @@ pub enum ActionCueConfidence {
     Deterministic,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_task: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_tool: Option<Action>,
     pub token_count: u64,
     #[serde(default, skip_serializing_if = "is_false")]
     pub awaiting_user_input: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awaiting_user_text: Option<String>,
+    #[serde(default)]
     pub recent_actions: Vec<Action>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_signal: Option<CommitSignal>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub action_cues: Vec<ActionCue>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {
     pub tool: String,
     pub path: String,
@@ -261,7 +262,7 @@ pub struct Source {
     pub cwd: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Stats {
     pub events_seen: u64,
     pub malformed_lines_skipped: u64,
@@ -269,14 +270,14 @@ pub struct Stats {
 }
 
 /// The full `clawgs.v2` extraction result: source metadata, normalized snapshot, and parse stats.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractOutput {
     pub schema_version: String,
     pub source: Source,
     pub snapshot: Snapshot,
     pub stats: Stats,
     pub generated_at: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_events: Option<Vec<Value>>,
 }
 
@@ -1530,5 +1531,28 @@ mod tests {
 
         assert_eq!(resolved.tool, AgentTool::Codex);
         assert_eq!(resolved.path, codex_file);
+    }
+
+    #[test]
+    fn extract_output_roundtrips_through_json() {
+        let jsonl = concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/test\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"hello\"}}\n",
+            "{\"type\":\"response\",\"payload\":{\"usage\":{\"input_tokens\":42}}}\n",
+        );
+        let output = extract_jsonl_str(
+            AgentTool::Codex,
+            "roundtrip-test",
+            jsonl,
+            std::path::Path::new("/tmp/test"),
+            false,
+            &ExtractOptions::default(),
+        )
+        .expect("extract");
+        let json = serde_json::to_string(&output).expect("serialize");
+        let back: ExtractOutput = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.schema_version, output.schema_version);
+        assert_eq!(back.snapshot.user_task, output.snapshot.user_task);
+        assert_eq!(back.stats.events_seen, output.stats.events_seen);
     }
 }

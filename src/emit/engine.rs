@@ -1731,12 +1731,23 @@ fn cue_info_for_update(
     CueInfo {
         cadence_tier: state.cadence_tier(config, now),
         cadence_ms,
-        next_llm_eligible_at: state
-            .last_call_at
-            .map(|last_call| last_call + ChronoDuration::milliseconds(cadence_ms as i64))
-            .unwrap_or(now),
+        next_llm_eligible_at: next_llm_eligible_at(state.last_call_at, cadence_ms, now),
         context_source,
     }
+}
+
+fn next_llm_eligible_at(
+    last_call_at: Option<DateTime<Utc>>,
+    cadence_ms: u64,
+    now: DateTime<Utc>,
+) -> DateTime<Utc> {
+    let Some(last_call_at) = last_call_at else {
+        return now;
+    };
+
+    last_call_at
+        .checked_add_signed(ChronoDuration::milliseconds(cadence_ms as i64))
+        .unwrap_or(last_call_at)
 }
 
 fn saturating_elapsed_ms(start: DateTime<Utc>, end: DateTime<Utc>) -> u64 {
@@ -2830,6 +2841,25 @@ mod tests {
             1,
             "huge multiplier must not wrap to a negative cadence and call again immediately"
         );
+    }
+
+    #[test]
+    fn cue_next_llm_eligible_at_does_not_panic_on_timestamp_overflow() {
+        let now = DateTime::<Utc>::MAX_UTC;
+        let session = sample_session(now);
+        let mut state = SessionRuntimeState::initialize_from_session(&session, now);
+        state.last_call_at = Some(now);
+
+        let cues = cue_info_for_update(
+            &state,
+            &ThoughtConfig::default(),
+            now,
+            ContextSource::Terminal,
+            1,
+        );
+
+        assert_eq!(cues.cadence_ms, 15_000);
+        assert_eq!(cues.next_llm_eligible_at, now);
     }
 
     #[test]

@@ -30,6 +30,7 @@ const TERMINAL_MIN_MEANINGFUL_DELTA_CHARS: usize = 100;
 const MAX_THOUGHT_CHARS: usize = 120;
 const DROWSY_AFTER_MS: i64 = 10_000;
 const DEFAULT_GROK_CADENCE_MULTIPLIER: u64 = 10;
+const MAX_GROK_CADENCE_MULTIPLIER: u64 = 1_000;
 const GROK_CADENCE_MULTIPLIER_ENV: &str = "CLAWGS_GROK_CADENCE_MULTIPLIER";
 
 pub const DEFAULT_AGENT_PREAMBLE: &str = "You are a status reporter for a coding agent session.";
@@ -336,7 +337,7 @@ impl EmitEngine {
         Self {
             clients,
             default_backend,
-            grok_cadence_multiplier: grok_cadence_multiplier.max(1),
+            grok_cadence_multiplier: clamp_grok_cadence_multiplier(grok_cadence_multiplier),
             per_session: HashMap::new(),
             stream_instance_id: format!(
                 "stream-{}-{}",
@@ -1651,9 +1652,13 @@ fn context_source_for_snapshot(context_snapshot: Option<&Snapshot>) -> ContextSo
 
 fn cadence_multiplier_for_backend(backend: ModelBackend, grok_cadence_multiplier: u64) -> u64 {
     match backend {
-        ModelBackend::GrokCli => grok_cadence_multiplier.max(1),
+        ModelBackend::GrokCli => clamp_grok_cadence_multiplier(grok_cadence_multiplier),
         ModelBackend::OpenRouter => 1,
     }
+}
+
+fn clamp_grok_cadence_multiplier(value: u64) -> u64 {
+    value.clamp(1, MAX_GROK_CADENCE_MULTIPLIER)
 }
 
 fn configured_grok_cadence_multiplier() -> u64 {
@@ -1661,6 +1666,7 @@ fn configured_grok_cadence_multiplier() -> u64 {
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|value| *value > 0)
+        .map(clamp_grok_cadence_multiplier)
         .unwrap_or(DEFAULT_GROK_CADENCE_MULTIPLIER)
 }
 
@@ -2769,6 +2775,60 @@ mod tests {
         assert_eq!(
             cues.next_llm_eligible_at,
             now + Duration::milliseconds(150_000)
+        );
+    }
+
+    #[test]
+    fn grok_multiplier_is_clamped_before_cadence_math() {
+        assert_eq!(cadence_multiplier_for_backend(ModelBackend::GrokCli, 0), 1);
+        assert_eq!(
+            cadence_multiplier_for_backend(ModelBackend::GrokCli, u64::MAX),
+            MAX_GROK_CADENCE_MULTIPLIER
+        );
+        assert_eq!(
+            cadence_multiplier_for_backend(ModelBackend::OpenRouter, u64::MAX),
+            1
+        );
+    }
+
+    #[test]
+    fn huge_grok_multiplier_does_not_wrap_cadence_due_check() {
+        let now = Utc::now();
+        let (mut engine, calls) = counting_grok_engine("narrating agent progress", u64::MAX);
+
+        for index in 0..2 {
+            let tick = now + Duration::seconds(15 * index);
+            let mut session = sample_session(tick);
+            session.replay_text = format!(
+                "cargo test --all\n\
+                 test emit::engine::huge_multiplier_tick_{index} ... ok\n\
+                 reviewing iteration {index} with enough changed terminal text to force a new objective fingerprint\n"
+            );
+
+            let result = engine.sync(&SyncRequest {
+                id: format!("huge-multiplier-{index}"),
+                now: tick,
+                config: ThoughtConfig::default(),
+                sessions: vec![session],
+            });
+
+            if index == 0 {
+                let cues = result.updates[0]
+                    .cues
+                    .as_ref()
+                    .expect("first update should include cues");
+                assert_eq!(cues.cadence_ms, 15_000 * MAX_GROK_CADENCE_MULTIPLIER);
+                assert_eq!(
+                    cues.next_llm_eligible_at,
+                    now + Duration::milliseconds((15_000 * MAX_GROK_CADENCE_MULTIPLIER) as i64)
+                );
+            }
+        }
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "huge multiplier must not wrap to a negative cadence and call again immediately"
         );
     }
 

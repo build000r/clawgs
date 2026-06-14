@@ -2,6 +2,7 @@ pub mod claude;
 pub mod codex;
 
 use std::fs;
+use std::io::BufRead;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -62,15 +63,27 @@ pub(crate) fn visit_jsonl(
     include_raw: bool,
     mut visit: impl FnMut(&Value),
 ) -> Result<JsonlStats> {
-    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let bytes_read = bytes.len() as u64;
+    let file =
+        fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut reader = std::io::BufReader::new(file);
 
     let mut stats = JsonlStatsAccumulator::new(include_raw);
-    for line in String::from_utf8_lossy(&bytes)
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-    {
-        stats.ingest(line, &mut visit);
+    let mut bytes_read = 0u64;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let read = reader
+            .read_until(b'\n', &mut line)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        bytes_read = bytes_read.saturating_add(read as u64);
+
+        let line = String::from_utf8_lossy(&line);
+        if !line.trim().is_empty() {
+            stats.ingest(&line, &mut visit);
+        }
     }
 
     Ok(stats.into_stats(bytes_read))
@@ -335,6 +348,29 @@ mod tests {
                 serde_json::json!({"type": "b"}),
             ])
         );
+    }
+
+    #[test]
+    fn visit_jsonl_preserves_lossy_utf8_and_final_line_stats() {
+        let file = NamedTempFile::new().expect("temp file");
+        let input = b"{\"type\":\"a\"}\n{\"type\":\"\xff\"}\nnot-json";
+        fs::write(file.path(), input).expect("write");
+
+        let mut visited = Vec::new();
+        let stats = visit_jsonl(file.path(), false, |value| visited.push(value.clone()))
+            .expect("visit jsonl");
+
+        assert_eq!(
+            visited,
+            vec![
+                serde_json::json!({"type": "a"}),
+                serde_json::json!({"type": "\u{fffd}"}),
+            ],
+            "streaming decode must preserve the previous from_utf8_lossy behavior"
+        );
+        assert_eq!(stats.events_seen, 2);
+        assert_eq!(stats.malformed_lines_skipped, 1);
+        assert_eq!(stats.bytes_read, input.len() as u64);
     }
 
     #[test]

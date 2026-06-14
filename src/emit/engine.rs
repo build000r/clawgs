@@ -256,10 +256,10 @@ impl SessionRuntimeState {
     }
 
     fn cadence_tier(&self, config: &ThoughtConfig, now: DateTime<Utc>) -> CadenceTier {
-        let objective_age_ms = (now - self.objective_stable_since).num_milliseconds();
-        if objective_age_ms >= config.cadence_cold_ms as i64 {
+        let objective_age_ms = saturating_elapsed_ms(self.objective_stable_since, now);
+        if objective_age_ms >= config.cadence_cold_ms {
             CadenceTier::Cold
-        } else if objective_age_ms >= config.cadence_warm_ms as i64 {
+        } else if objective_age_ms >= config.cadence_warm_ms {
             CadenceTier::Warm
         } else {
             CadenceTier::Hot
@@ -288,8 +288,8 @@ impl SessionRuntimeState {
     ) -> bool {
         match self.last_call_at {
             Some(last_call) => {
-                let elapsed_ms = (now - last_call).num_milliseconds();
-                elapsed_ms >= self.cadence_for_state(config, now, cadence_multiplier) as i64
+                let elapsed_ms = saturating_elapsed_ms(last_call, now);
+                elapsed_ms >= self.cadence_for_state(config, now, cadence_multiplier)
             }
             None => true,
         }
@@ -1716,7 +1716,7 @@ fn timing_info_for_update(
         run_started_at: state.run_started_at,
         run_finished_at: state.run_finished_at,
         run_elapsed_ms: saturating_elapsed_ms(state.run_started_at, run_end),
-        idle_elapsed_ms: (now - session.last_activity_at).num_milliseconds().max(0) as u64,
+        idle_elapsed_ms: saturating_elapsed_ms(session.last_activity_at, now),
     }
 }
 
@@ -1754,7 +1754,7 @@ fn next_llm_eligible_at(
 }
 
 fn saturating_elapsed_ms(start: DateTime<Utc>, end: DateTime<Utc>) -> u64 {
-    (end - start).num_milliseconds().max(0) as u64
+    u64::try_from((end - start).num_milliseconds()).unwrap_or(0)
 }
 
 fn sleeping_thought_source(state: &SessionRuntimeState) -> ThoughtSource {
@@ -2844,6 +2844,25 @@ mod tests {
             1,
             "huge multiplier must not wrap to a negative cadence and call again immediately"
         );
+    }
+
+    #[test]
+    fn huge_direct_cadence_config_does_not_wrap_due_check() {
+        let now = Utc::now();
+        let session = sample_session(now);
+        let mut state = SessionRuntimeState::initialize_from_session(&session, now);
+        state.last_call_at = Some(now);
+
+        let config = ThoughtConfig {
+            cadence_hot_ms: u64::MAX,
+            cadence_warm_ms: u64::MAX,
+            cadence_cold_ms: u64::MAX,
+            ..ThoughtConfig::default()
+        };
+
+        assert_eq!(state.cadence_tier(&config, now), CadenceTier::Hot);
+        assert!(!state.should_call_for_cadence(&config, now, 1));
+        assert!(!state.should_call_for_cadence(&config, now + Duration::milliseconds(1), 1));
     }
 
     #[test]

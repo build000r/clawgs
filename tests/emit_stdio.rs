@@ -45,7 +45,11 @@ fn session_snapshot(replay_text: &str) -> Value {
     })
 }
 
-fn run_emit_stdio(lines: &[Value], envs: &[(&str, &str)], remove_envs: &[&str]) -> Vec<Value> {
+fn run_emit_stdio_lines(
+    lines: &[String],
+    envs: &[(&str, &str)],
+    remove_envs: &[&str],
+) -> Vec<Value> {
     let home = TempDir::new().expect("temp home");
     let mut command = Command::new(env!("CARGO_BIN_EXE_clawgs"));
     command
@@ -81,6 +85,19 @@ fn run_emit_stdio(lines: &[Value], envs: &[(&str, &str)], remove_envs: &[&str]) 
         .lines()
         .map(|line| serde_json::from_str(line).expect("json line"))
         .collect()
+}
+
+fn run_emit_stdio(lines: &[Value], envs: &[(&str, &str)], remove_envs: &[&str]) -> Vec<Value> {
+    let rendered = lines.iter().map(Value::to_string).collect::<Vec<_>>();
+    run_emit_stdio_lines(&rendered, envs, remove_envs)
+}
+
+fn run_emit_stdio_raw(lines: &[&str]) -> Vec<Value> {
+    let rendered = lines
+        .iter()
+        .map(|line| (*line).to_string())
+        .collect::<Vec<_>>();
+    run_emit_stdio_lines(&rendered, &[], &[])
 }
 
 fn fake_grok_script(temp_dir: &TempDir) -> std::path::PathBuf {
@@ -233,6 +250,29 @@ fn emit_stdio_writes_hello_and_sync_result() {
     assert_eq!(result["type"], "sync_result");
     assert_eq!(result["id"], "req-1");
     assert!(result["stream_instance_id"].as_str().is_some());
+}
+
+#[test]
+fn emit_stdio_reports_valid_json_envelope_shape_errors_as_invalid_request() {
+    let lines = run_emit_stdio_raw(&[
+        r#"{"id":"req-missing-type","sessions":[]}"#,
+        r#"{"type":"sync","id":7,"sessions":[]}"#,
+        "{not-json",
+    ]);
+
+    assert_eq!(lines[0]["type"], "hello");
+
+    assert_eq!(lines[1]["type"], "error");
+    assert_eq!(lines[1]["id"], "req-missing-type");
+    assert_eq!(lines[1]["code"], "invalid_request");
+
+    assert_eq!(lines[2]["type"], "error");
+    assert!(lines[2].get("id").is_none());
+    assert_eq!(lines[2]["code"], "invalid_request");
+
+    assert_eq!(lines[3]["type"], "error");
+    assert!(lines[3].get("id").is_none());
+    assert_eq!(lines[3]["code"], "invalid_json");
 }
 
 #[test]

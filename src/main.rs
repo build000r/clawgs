@@ -341,7 +341,14 @@ fn handle_emit_line<W: Write>(
 #[derive(Deserialize)]
 struct EmitMessageHeader {
     #[serde(rename = "type")]
-    msg_type: String,
+    #[serde(default)]
+    msg_type: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct EmitMessageIdHeader {
     #[serde(default)]
     id: Option<String>,
 }
@@ -350,15 +357,18 @@ fn sync_response_for_line(
     engine: &mut EmitEngine,
     trimmed: &str,
 ) -> std::result::Result<SyncResultMessage, ErrorMessage> {
-    let header: EmitMessageHeader = serde_json::from_str(trimmed).map_err(|error| {
-        ErrorMessage::new(None, "invalid_json", format!("invalid JSON: {error}"))
+    let header: EmitMessageHeader =
+        serde_json::from_str(trimmed).map_err(|error| emit_header_error(trimmed, error))?;
+
+    let msg_type = header.msg_type.ok_or_else(|| {
+        ErrorMessage::new(header.id.clone(), "invalid_request", "missing message type")
     })?;
 
-    if header.msg_type != "sync" {
+    if msg_type != "sync" {
         return Err(ErrorMessage::new(
             header.id,
             "unknown_message_type",
-            format!("unsupported message type: {}", header.msg_type),
+            format!("unsupported message type: {msg_type}"),
         ));
     }
 
@@ -380,6 +390,25 @@ fn sync_response_for_line(
     validate_request_action_cues(&request)
         .map_err(|error| ErrorMessage::new(Some(request.id.clone()), "invalid_request", error))?;
     Ok(engine.sync(&request))
+}
+
+fn emit_header_error(trimmed: &str, error: serde_json::Error) -> ErrorMessage {
+    match error.classify() {
+        serde_json::error::Category::Syntax | serde_json::error::Category::Eof => {
+            ErrorMessage::new(None, "invalid_json", format!("invalid JSON: {error}"))
+        }
+        serde_json::error::Category::Data | serde_json::error::Category::Io => ErrorMessage::new(
+            parse_emit_header_id(trimmed),
+            "invalid_request",
+            format!("invalid message envelope: {error}"),
+        ),
+    }
+}
+
+fn parse_emit_header_id(trimmed: &str) -> Option<String> {
+    serde_json::from_str::<EmitMessageIdHeader>(trimmed)
+        .ok()
+        .and_then(|header| header.id)
 }
 
 fn validate_request_action_cues(request: &SyncRequest) -> std::result::Result<(), String> {

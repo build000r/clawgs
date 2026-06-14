@@ -149,7 +149,7 @@ fn user_response_item_text(payload: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|role| *role == "user")
         .and_then(|_| extract_user_input_text(payload))
-        .filter(|text| text.chars().count() < 1000 && !is_harness_markup(text))
+        .filter(|text| !is_harness_markup(text))
 }
 
 fn user_event_message_text(payload: &Value) -> Option<String> {
@@ -1026,15 +1026,46 @@ mod tests {
     }
 
     #[test]
-    fn user_response_item_text_rejects_exactly_1000_chars() {
+    fn user_response_item_text_preserves_exactly_1000_chars() {
+        let text = "a".repeat(1000);
         let payload = serde_json::json!({
             "role": "user",
             "content": [
-                {"type": "input_text", "text": "a".repeat(1000)}
+                {"type": "input_text", "text": text}
             ]
         });
 
-        assert_eq!(user_response_item_text(&payload), None);
+        assert_eq!(
+            user_response_item_text(&payload).as_deref(),
+            Some(text.as_str())
+        );
+    }
+
+    #[test]
+    fn parse_codex_truncates_long_response_item_user_task_instead_of_dropping_it() {
+        let long_task = "A".repeat(1_200);
+        let line = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "role": "user",
+                "content": [{"type": "input_text", "text": long_task}]
+            }
+        })
+        .to_string();
+        let file = NamedTempFile::new().expect("temp file");
+        fs::write(file.path(), format!("{line}\n")).expect("write fixture");
+
+        let options = ExtractOptions {
+            max_task_chars: 120,
+            ..ExtractOptions::default()
+        };
+        let snapshot = parse(file.path(), &options).expect("parse");
+
+        let task = snapshot
+            .user_task
+            .expect("long user task should be preserved after truncation");
+        assert_eq!(task.chars().count(), options.max_task_chars);
+        assert!(task.chars().all(|ch| ch == 'A'));
     }
 
     #[test]

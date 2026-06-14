@@ -4,6 +4,7 @@ use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,6 +22,7 @@ const GROK_BIN_ENV: &str = "CLAWGS_GROK_BIN";
 const GROK_WORKDIR_ENV: &str = "CLAWGS_GROK_WORKDIR";
 const GROK_MAX_TURNS_ENV: &str = "CLAWGS_GROK_MAX_TURNS";
 const GROK_RUNTIME_DIR: &str = "clawgs-grok-headless";
+static UNIQUE_STAMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 const MODEL_ENV_KEYS: [&str; 3] = [
     "SWIMMERS_THOUGHT_MODEL",
     "SWIMMERS_THOUGHT_MODEL_2",
@@ -270,6 +272,8 @@ fn configured_bin(env_key: &str, default: &str) -> String {
 
 fn candidate_models(model_override: Option<&str>, backend: ModelBackend) -> Vec<String> {
     model_override
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
         .map(|model| vec![model.to_string()])
         .unwrap_or_else(|| configured_models(backend))
 }
@@ -344,13 +348,15 @@ struct SubprocessOutput {
 }
 
 fn unique_stamp() -> String {
+    let counter = UNIQUE_STAMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!(
-        "{}-{}",
+        "{}-{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_nanos()
+            .as_nanos(),
+        counter
     )
 }
 
@@ -631,7 +637,7 @@ mod tests {
         build_grok_headless_args, build_openrouter_request_body, command_available_with_timeout,
         create_private_file, default_model_for_backend, ensure_private_runtime_dir,
         extract_openrouter_content, failure_preview, interpret_openrouter_response,
-        pick_nonempty_or_fallback, run_subprocess_capturing, thought_models,
+        pick_nonempty_or_fallback, run_subprocess_capturing, thought_models, unique_stamp,
         validate_backend_credentials, GrokCliModelClient, ModelBackend, ModelClient,
         OpenRouterModelClient, SubprocessSpec,
     };
@@ -640,6 +646,23 @@ mod tests {
     fn thought_models_prefers_override() {
         let models = thought_models(Some("custom/model"), ModelBackend::GrokCli);
         assert_eq!(models, vec!["custom/model".to_string()]);
+    }
+
+    #[test]
+    fn thought_models_trims_override_and_ignores_blank_override() {
+        let _lock = lock_env();
+        std::env::remove_var("SWIMMERS_THOUGHT_MODEL");
+        std::env::remove_var("SWIMMERS_THOUGHT_MODEL_2");
+        std::env::remove_var("SWIMMERS_THOUGHT_MODEL_3");
+
+        assert_eq!(
+            thought_models(Some("  openrouter/test-model  "), ModelBackend::OpenRouter),
+            vec!["openrouter/test-model".to_string()]
+        );
+        assert_eq!(
+            thought_models(Some(" \t\n "), ModelBackend::OpenRouter),
+            vec!["openrouter/free".to_string()]
+        );
     }
 
     #[test]
@@ -874,6 +897,24 @@ mod tests {
             fs::read_to_string(&path).expect("private file"),
             "secret prompt"
         );
+    }
+
+    #[test]
+    fn unique_stamp_includes_monotonic_counter() {
+        let first = unique_stamp();
+        let second = unique_stamp();
+
+        assert_ne!(first, second);
+        assert_eq!(first.matches('-').count(), 2);
+        assert_eq!(second.matches('-').count(), 2);
+        assert!(stamp_counter(&second) > stamp_counter(&first));
+    }
+
+    fn stamp_counter(stamp: &str) -> u64 {
+        stamp
+            .rsplit_once('-')
+            .and_then(|(_, counter)| counter.parse::<u64>().ok())
+            .unwrap_or_else(|| panic!("stamp should end with a numeric counter: {stamp}"))
     }
 
     #[test]

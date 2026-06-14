@@ -1744,9 +1744,12 @@ fn next_llm_eligible_at(
     let Some(last_call_at) = last_call_at else {
         return now;
     };
+    let Ok(cadence_ms) = i64::try_from(cadence_ms) else {
+        return last_call_at;
+    };
 
     last_call_at
-        .checked_add_signed(ChronoDuration::milliseconds(cadence_ms as i64))
+        .checked_add_signed(ChronoDuration::milliseconds(cadence_ms))
         .unwrap_or(last_call_at)
 }
 

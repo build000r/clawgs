@@ -207,6 +207,7 @@ impl Display for ThoughtConfigValidationError {
 impl Error for ThoughtConfigValidationError {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct SessionSnapshot {
     pub session_id: String,
     pub state: SessionState,
@@ -301,17 +302,18 @@ impl<'de> Deserialize<'de> for SyncRequest {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 struct SyncRequestWire {
     #[serde(rename = "type")]
     message_type: String,
     id: String,
     now: DateTime<Utc>,
     config: SyncRequestConfigWire,
-    #[serde(default)]
     sessions: Vec<SessionSnapshot>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 struct SyncRequestConfigWire {
     enabled: bool,
     model: String,
@@ -1000,6 +1002,65 @@ mod tests {
         let err =
             serde_json::from_str::<SyncRequest>(&wrong_type).expect_err("wrong type must fail");
         assert!(err.to_string().contains("expected sync request type"));
+    }
+
+    #[test]
+    fn sync_request_rejects_missing_sessions() {
+        let raw = serde_json::json!({
+            "type": "sync",
+            "id": "req-missing-sessions",
+            "now": "2026-02-26T21:00:00Z",
+            "config": {
+                "enabled": true,
+                "model": "",
+                "cadence_hot_ms": 15000,
+                "cadence_warm_ms": 45000,
+                "cadence_cold_ms": 120000
+            }
+        })
+        .to_string();
+
+        let err = serde_json::from_str::<SyncRequest>(&raw)
+            .expect_err("sessions is required by clawgs.emit.v2");
+        assert!(err.to_string().contains("missing field `sessions`"));
+    }
+
+    #[test]
+    fn sync_request_rejects_unknown_fields_from_closed_schema_objects() {
+        let base = serde_json::json!({
+            "type": "sync",
+            "id": "req-extra",
+            "now": "2026-02-26T21:00:00Z",
+            "config": {
+                "enabled": true,
+                "model": "",
+                "cadence_hot_ms": 15000,
+                "cadence_warm_ms": 45000,
+                "cadence_cold_ms": 120000
+            },
+            "sessions": [serde_json::to_value(sample_session()).expect("session json")]
+        });
+
+        let mut top_level_extra = base.clone();
+        top_level_extra["extra"] = serde_json::json!(true);
+        assert!(
+            serde_json::from_value::<SyncRequest>(top_level_extra).is_err(),
+            "sync request is closed by the v2 schema"
+        );
+
+        let mut config_extra = base.clone();
+        config_extra["config"]["extra"] = serde_json::json!(true);
+        assert!(
+            serde_json::from_value::<SyncRequest>(config_extra).is_err(),
+            "sync config is closed by the v2 schema"
+        );
+
+        let mut session_extra = base;
+        session_extra["sessions"][0]["extra"] = serde_json::json!(true);
+        assert!(
+            serde_json::from_value::<SyncRequest>(session_extra).is_err(),
+            "session snapshot is closed by the v2 schema"
+        );
     }
 
     #[test]

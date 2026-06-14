@@ -257,6 +257,7 @@ fn emit_stdio_reports_valid_json_envelope_shape_errors_as_invalid_request() {
     let lines = run_emit_stdio_raw(&[
         r#"{"id":"req-missing-type","sessions":[]}"#,
         r#"{"type":"sync","id":7,"sessions":[]}"#,
+        r#"{"type":"sync","id":"req-missing-sessions","now":"2026-02-26T21:00:00Z","config":{"enabled":true,"model":"","cadence_hot_ms":15000,"cadence_warm_ms":45000,"cadence_cold_ms":120000}}"#,
         "{not-json",
     ]);
 
@@ -271,8 +272,12 @@ fn emit_stdio_reports_valid_json_envelope_shape_errors_as_invalid_request() {
     assert_eq!(lines[2]["code"], "invalid_request");
 
     assert_eq!(lines[3]["type"], "error");
-    assert!(lines[3].get("id").is_none());
-    assert_eq!(lines[3]["code"], "invalid_json");
+    assert_eq!(lines[3]["id"], "req-missing-sessions");
+    assert_eq!(lines[3]["code"], "invalid_request");
+
+    assert_eq!(lines[4]["type"], "error");
+    assert!(lines[4].get("id").is_none());
+    assert_eq!(lines[4]["code"], "invalid_json");
 }
 
 #[test]

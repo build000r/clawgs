@@ -46,7 +46,14 @@ enum Commands {
     /// Read Claude Code hook JSON from stdin and wake a running `tmux-emit` daemon without blocking Claude.
     ClaudeHookNotify(ClaudeHookNotifyArgs),
     /// Print resolved daemon defaults as JSON.
-    Defaults,
+    Defaults(DefaultsArgs),
+}
+
+#[derive(Debug, Args)]
+struct DefaultsArgs {
+    /// Pretty-print the JSON output (default: single-line compact).
+    #[arg(long)]
+    pretty: bool,
 }
 
 #[derive(Debug, Args)]
@@ -207,9 +214,28 @@ enum DemoToolArg {
 
 fn main() {
     if let Err(error) = run() {
+        if is_broken_pipe(&error) {
+            return;
+        }
         eprintln!("error: {error:#}");
         std::process::exit(1);
     }
+}
+
+fn is_broken_pipe(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        if cause
+            .downcast_ref::<io::Error>()
+            .is_some_and(|io_error| io_error.kind() == io::ErrorKind::BrokenPipe)
+        {
+            return true;
+        }
+
+        cause
+            .downcast_ref::<serde_json::Error>()
+            .and_then(serde_json::Error::io_error_kind)
+            .is_some_and(|kind| kind == io::ErrorKind::BrokenPipe)
+    })
 }
 
 fn run() -> Result<()> {
@@ -221,7 +247,7 @@ fn run() -> Result<()> {
         Commands::TmuxEmit(args) => run_tmux_emit(args),
         Commands::TmuxNotify(args) => run_tmux_notify(args),
         Commands::ClaudeHookNotify(args) => run_claude_hook_notify(args),
-        Commands::Defaults => run_defaults(),
+        Commands::Defaults(args) => run_defaults(args),
     }
 }
 
@@ -441,7 +467,7 @@ impl EmitLineResult {
     }
 }
 
-fn run_defaults() -> Result<()> {
+fn run_defaults(args: DefaultsArgs) -> Result<()> {
     let backend = resolve_model_backend();
     let model = default_model_for_backend(backend);
 
@@ -460,8 +486,7 @@ fn run_defaults() -> Result<()> {
         terminal_prompt: DEFAULT_TERMINAL_PREAMBLE,
     };
 
-    println!("{}", serde_json::to_string(&defaults)?);
-    Ok(())
+    print_json(&defaults, args.pretty)
 }
 
 fn validate_extract_limits(
@@ -491,11 +516,14 @@ fn validate_tmux_emit_args(args: &TmuxEmitArgs) -> Result<()> {
 }
 
 fn print_json<T: Serialize>(value: &T, pretty: bool) -> Result<()> {
+    let mut stdout = io::stdout().lock();
     if pretty {
-        println!("{}", serde_json::to_string_pretty(value)?);
+        serde_json::to_writer_pretty(&mut stdout, value)
+            .context("failed to write JSON response")?;
     } else {
-        println!("{}", serde_json::to_string(value)?);
+        serde_json::to_writer(&mut stdout, value).context("failed to write JSON response")?;
     }
+    writeln!(stdout).context("failed to write JSON response")?;
     Ok(())
 }
 

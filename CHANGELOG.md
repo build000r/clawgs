@@ -33,6 +33,8 @@ delta facts, and Claude Code hook wake-ups explicit.
 - Added no-credentials stdio tests proving missing backend credentials are
   reported as `sync_result.metrics.last_backend_error` instead of daemon
   process failures.
+- Restricted runtime prompt permissions for the Grok headless backend.
+- Throttled repeated Grok narration to reduce redundant headless cold-starts.
 
 ### Emit Protocol And Discovery
 
@@ -47,6 +49,11 @@ delta facts, and Claude Code hook wake-ups explicit.
   duplicate-session exclusion fallback, and scan bounds.
 - Added checked-in golden contract fixtures for demo emit/extract and fixture
   extraction output.
+- Streamed JSONL reads to avoid loading entire transcripts into memory.
+- Kept long Codex user tasks that previously truncated prematurely.
+- Bounded `awaiting_user_text` to `max_task_chars` to prevent unbounded
+  snapshot fields.
+- Applied harness-markup redaction uniformly across public-snapshot text fields.
 
 ### Hooks And Local Integration
 
@@ -66,8 +73,12 @@ delta facts, and Claude Code hook wake-ups explicit.
 - Expanded package exclusions and release workflow package checks for local
   operator state such as `.beads/`, `.mcp.json`, `.claude/`, `.codex/`, backup
   files, and `.env` files.
+- Excluded `memory/`, `diagrams/`, and `AGENTS.md` from the published crate
+  package so operator-internal artifacts do not ship to crates.io users.
 - Added `scripts/check.sh` coverage for the `defaults` command in addition to
   help and fixture extraction.
+- Handled broken stdout pipes gracefully so piped output (e.g. `clawgs extract |
+  head`) exits cleanly instead of printing an error.
 
 ### Packaging And Install
 
@@ -79,6 +90,69 @@ delta facts, and Claude Code hook wake-ups explicit.
 - Added [`docs/INSTALL.md`](docs/INSTALL.md): a checked-in, sanitized
   clean-install proof covering `cargo install --path . --locked` and the
   zero-config `demo extract` / `demo emit` flows.
+
+### CI
+
+- Added a GitHub Actions CI workflow running `fmt --check`, `clippy`, `test
+  --locked`, and `build --release --locked` on push to `main` and on pull
+  requests.
+- Added `Swatinem/rust-cache@v2` to both CI and release workflows for faster
+  dependency builds.
+- Added forbidden-package patterns to the release workflow so `memory/`,
+  `diagrams/`, and `AGENTS.md` are caught before publish.
+
+### Documentation
+
+- Added crate-level `//!` documentation with a working doc-test for
+  `extract_jsonl_str`, giving docs.rs a meaningful landing page with an inline
+  usage example.
+- Added `///` doc comments to all 13 public functions and types in the library
+  API (`ExtractOutput`, `ResolvedInput`, `resolve_input`, `extract`,
+  `extract_jsonl_str`, `infer_tool_from_file`, `discover_for_tool`,
+  `discover_auto`, `discover_claude_path`, `discover_claude_paths`,
+  `discover_codex_path`, `discover_codex_paths`, and exclusion variants).
+- Added `//!` module-level doc comments to all public modules (`emit`,
+  `emit::protocol`, `emit::engine`, `emit::model_client`, `parsers`,
+  `parsers::claude`, `parsers::codex`, `tmux`).
+- Added field-level `///` doc comments to every public struct field, enum
+  variant, and method in `lib.rs`.
+- Added `#![warn(missing_docs)]` to the crate root so undocumented public API
+  additions produce compiler warnings.
+- Added CI status badge to `README.md`.
+- Added Library Usage section to `README.md` with `extract_jsonl_str` and
+  `Deserialize` round-trip examples.
+- Updated `SKILL.md` with the `defaults` command, library usage as a Rust
+  dependency, `Deserialize` support, and refreshed `0.3.0` scope description.
+
+### Library API
+
+- Derived `Deserialize` on six core output types (`Action`, `CommitSignal`,
+  `Snapshot`, `Source`, `Stats`, `ExtractOutput`) with `#[serde(default)]` on
+  optional fields, so downstream consumers can parse saved `clawgs.v2` JSON back
+  into typed Rust structs.
+- Added a `extract_output_roundtrips_through_json` test proving serialize →
+  deserialize fidelity.
+- Added `--pretty` flag to the `defaults` command with integration tests.
+
+### Dependencies
+
+- Updated 77 `Cargo.lock` dependencies to latest compatible versions (chrono
+  0.4.45, clap 4.6.1, hyper 1.10.1, reqwest 0.12.28, anstream 1.0.0).
+
+### Performance
+
+- Parsed embedded demo transcripts in memory instead of writing temporary files,
+  removing filesystem I/O from `demo extract`.
+- Simplified action cue selection to a direct match instead of iterating
+  candidate lists.
+
+### Downstream Contracts
+
+- Added a `downstream_swimmers_contract` integration test smoking the extract
+  and emit entry points that Swimmers depends on.
+- Added golden contract tests for the Claude fixture and the `codex-current`
+  fixture (with action cues and commit signals), bringing golden coverage from
+  4 to 6 contracts.
 
 ## [0.2.0] - 2026-05-06
 

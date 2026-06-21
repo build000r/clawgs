@@ -1,3 +1,5 @@
+//! Codex JSONL transcript parser.
+
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -5,7 +7,8 @@ use anyhow::Result;
 use serde_json::Value;
 
 use super::{
-    extract_timestamp, is_harness_markup, push_action, truncate, visit_jsonl, ParseSnapshot,
+    extract_timestamp, is_harness_markup, push_action, truncate, visit_jsonl, visit_jsonl_str,
+    JsonlStats, ParseSnapshot,
 };
 use crate::{Action, CommitSignal, ExtractOptions};
 
@@ -18,93 +21,131 @@ struct ToolCallObservation {
 }
 
 pub(crate) fn parse(path: &Path, options: &ExtractOptions) -> Result<ParseSnapshot> {
-    let mut user_task: Option<String> = None;
-    let mut recent_actions: Vec<Action> = Vec::new();
-    let mut current_tool: Option<Action> = None;
-    let mut token_count = 0u64;
-    let mut awaiting_user_input = false;
-    let mut awaiting_user_text: Option<String> = None;
-    let mut pending_validation_commands: HashMap<String, String> = HashMap::new();
-    let mut pending_validation_sessions: HashMap<String, String> = HashMap::new();
-    let mut pending_dirty_check_commands: HashSet<String> = HashSet::new();
-    let mut pending_commit_commands: HashSet<String> = HashSet::new();
-    let mut commit_signal = CommitSignal::default();
-
+    let mut state = CodexParseState::new();
     let stats = visit_jsonl(path, options.include_raw, |entry| {
+        state.ingest(entry, options);
+    })?;
+
+    Ok(state.into_snapshot(stats))
+}
+
+pub(crate) fn parse_str(input: &str, options: &ExtractOptions) -> Result<ParseSnapshot> {
+    let mut state = CodexParseState::new();
+    let stats = visit_jsonl_str(input, options.include_raw, |entry| {
+        state.ingest(entry, options);
+    })?;
+
+    Ok(state.into_snapshot(stats))
+}
+
+struct CodexParseState {
+    user_task: Option<String>,
+    recent_actions: Vec<Action>,
+    current_tool: Option<Action>,
+    token_count: u64,
+    awaiting_user_input: bool,
+    awaiting_user_text: Option<String>,
+    pending_validation_commands: HashMap<String, String>,
+    pending_validation_sessions: HashMap<String, String>,
+    pending_dirty_check_commands: HashSet<String>,
+    pending_commit_commands: HashSet<String>,
+    commit_signal: CommitSignal,
+}
+
+impl CodexParseState {
+    fn new() -> Self {
+        Self {
+            user_task: None,
+            recent_actions: Vec::new(),
+            current_tool: None,
+            token_count: 0,
+            awaiting_user_input: false,
+            awaiting_user_text: None,
+            pending_validation_commands: HashMap::new(),
+            pending_validation_sessions: HashMap::new(),
+            pending_dirty_check_commands: HashSet::new(),
+            pending_commit_commands: HashSet::new(),
+            commit_signal: CommitSignal::default(),
+        }
+    }
+
+    fn ingest(&mut self, entry: &Value, options: &ExtractOptions) {
         let ts = extract_timestamp(entry);
-        update_user_task(entry, options, &mut user_task);
-        update_token_count(entry, &mut token_count);
+        update_user_task(entry, options, &mut self.user_task);
+        update_token_count(entry, &mut self.token_count);
         update_awaiting_user_state(
             entry,
             options,
-            &mut awaiting_user_input,
-            &mut awaiting_user_text,
+            &mut self.awaiting_user_input,
+            &mut self.awaiting_user_text,
         );
 
         observe_and_record(
             function_call_observation(entry, options, &ts),
-            &mut pending_validation_commands,
-            &mut pending_validation_sessions,
-            &mut pending_dirty_check_commands,
-            &mut pending_commit_commands,
-            &mut commit_signal,
-            &mut recent_actions,
-            &mut current_tool,
+            &mut self.pending_validation_commands,
+            &mut self.pending_validation_sessions,
+            &mut self.pending_dirty_check_commands,
+            &mut self.pending_commit_commands,
+            &mut self.commit_signal,
+            &mut self.recent_actions,
+            &mut self.current_tool,
             options.max_actions,
         );
         observe_and_record(
             custom_tool_call_observation(entry, options, &ts),
-            &mut pending_validation_commands,
-            &mut pending_validation_sessions,
-            &mut pending_dirty_check_commands,
-            &mut pending_commit_commands,
-            &mut commit_signal,
-            &mut recent_actions,
-            &mut current_tool,
+            &mut self.pending_validation_commands,
+            &mut self.pending_validation_sessions,
+            &mut self.pending_dirty_check_commands,
+            &mut self.pending_commit_commands,
+            &mut self.commit_signal,
+            &mut self.recent_actions,
+            &mut self.current_tool,
             options.max_actions,
         );
 
         update_command_output_signals(
             entry,
-            &mut pending_validation_commands,
-            &mut pending_validation_sessions,
-            &mut pending_dirty_check_commands,
-            &mut pending_commit_commands,
-            &mut commit_signal,
+            &mut self.pending_validation_commands,
+            &mut self.pending_validation_sessions,
+            &mut self.pending_dirty_check_commands,
+            &mut self.pending_commit_commands,
+            &mut self.commit_signal,
         );
 
         if let Some(action) = reasoning_event_action(entry, options, &ts) {
             record_action(
-                &mut recent_actions,
-                &mut current_tool,
+                &mut self.recent_actions,
+                &mut self.current_tool,
                 action,
                 options.max_actions,
             );
         }
 
         record_actions(
-            &mut recent_actions,
-            &mut current_tool,
+            &mut self.recent_actions,
+            &mut self.current_tool,
             reasoning_summary_actions(entry, options, &ts),
             options.max_actions,
         );
-    })?;
+    }
 
-    commit_signal.finalize();
+    fn into_snapshot(mut self, stats: JsonlStats) -> ParseSnapshot {
+        self.commit_signal.finalize();
 
-    Ok(ParseSnapshot {
-        user_task,
-        recent_actions,
-        current_tool,
-        token_count,
-        awaiting_user_input,
-        awaiting_user_text,
-        commit_signal: Some(commit_signal),
-        events_seen: stats.events_seen,
-        malformed_lines_skipped: stats.malformed_lines_skipped,
-        bytes_read: stats.bytes_read,
-        raw_events: stats.raw_events,
-    })
+        ParseSnapshot {
+            user_task: self.user_task,
+            recent_actions: self.recent_actions,
+            current_tool: self.current_tool,
+            token_count: self.token_count,
+            awaiting_user_input: self.awaiting_user_input,
+            awaiting_user_text: self.awaiting_user_text,
+            commit_signal: Some(self.commit_signal),
+            events_seen: stats.events_seen,
+            malformed_lines_skipped: stats.malformed_lines_skipped,
+            bytes_read: stats.bytes_read,
+            raw_events: stats.raw_events,
+        }
+    }
 }
 
 fn entry_type(entry: &Value) -> &str {
@@ -183,10 +224,10 @@ fn update_awaiting_user_state(
 ) {
     // Use a structural check rather than `user_task_text(...).is_some()`. The
     // task-text path filters out user turns whose content is markup-prefixed
-    // (e.g. `<system-reminder>...`), >=1000 chars, or whitespace-only — but
-    // those are still valid user turns that should clear the awaiting flag.
-    // Without this, an agent that finished a final-answer and then received a
-    // system-reminder-prefixed user reply would stay flagged as
+    // (e.g. `<system-reminder>...`) or whitespace-only — but those are still
+    // valid user turns that should clear the awaiting flag. Without this, an
+    // agent that finished a final-answer and then received a system-reminder-
+    // prefixed user reply would stay flagged as
     // `awaiting_user_input=true` and the engine would keep the session
     // Sleeping while it is actually back at work.
     if is_user_turn_entry(entry) || event_payload(entry, "turn_aborted").is_some() {
@@ -1026,19 +1067,15 @@ mod tests {
     }
 
     #[test]
-    fn user_response_item_text_preserves_exactly_1000_chars() {
-        let text = "a".repeat(1000);
+    fn user_response_item_text_accepts_exactly_1000_chars() {
         let payload = serde_json::json!({
             "role": "user",
             "content": [
-                {"type": "input_text", "text": text}
+                {"type": "input_text", "text": "a".repeat(1000)}
             ]
         });
 
-        assert_eq!(
-            user_response_item_text(&payload).as_deref(),
-            Some(text.as_str())
-        );
+        assert_eq!(user_response_item_text(&payload), Some("a".repeat(1000)));
     }
 
     #[test]
@@ -1218,19 +1255,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_codex_ignores_markup_and_oversized_user_inputs() {
+    fn parse_codex_ignores_markup_and_blank_user_inputs() {
         let file = NamedTempFile::new().expect("temp file");
-        let oversized = "a".repeat(1001);
         fs::write(
             file.path(),
-            format!(
-                concat!(
-                    "{{\"type\":\"response_item\",\"payload\":{{\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"<system>\"}}]}}}}\n",
-                    "{{\"type\":\"response_item\",\"payload\":{{\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"{oversized}\"}}]}}}}\n",
-                    "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"   \"}}}}\n",
-                    "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"Use the fallback task\"}}}}\n"
-                ),
-                oversized = oversized
+            concat!(
+                "{\"type\":\"response_item\",\"payload\":{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"<system>\"}]}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"   \"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Use the fallback task\"}}\n"
             ),
         )
         .expect("write fixture");
@@ -1238,6 +1270,25 @@ mod tests {
         let snapshot = parse(file.path(), &ExtractOptions::default()).expect("parse");
 
         assert_eq!(snapshot.user_task.as_deref(), Some("Use the fallback task"));
+    }
+
+    #[test]
+    fn parse_codex_truncates_oversized_response_item_user_task() {
+        let file = NamedTempFile::new().expect("temp file");
+        let oversized = "a".repeat(1500);
+        fs::write(
+            file.path(),
+            format!(
+                "{{\"type\":\"response_item\",\"payload\":{{\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"{oversized}\"}}]}}}}\n",
+                oversized = oversized
+            ),
+        )
+        .expect("write fixture");
+
+        let snapshot = parse(file.path(), &ExtractOptions::default()).expect("parse");
+
+        let expected = "a".repeat(ExtractOptions::default().max_task_chars);
+        assert_eq!(snapshot.user_task.as_deref(), Some(expected.as_str()));
     }
 
     #[test]

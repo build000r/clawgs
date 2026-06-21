@@ -1,3 +1,41 @@
+//! Normalize Claude Code and Codex JSONL transcripts into stable
+//! [`clawgs.v2`](https://github.com/build000r/clawgs/blob/main/references/schema-v2.md)
+//! JSON snapshots.
+//!
+//! # Library usage
+//!
+//! Parse a JSONL string into a structured [`ExtractOutput`]:
+//!
+//! ```
+//! use std::path::Path;
+//! use clawgs::{AgentTool, ExtractOptions, extract_jsonl_str};
+//!
+//! let jsonl = r#"{"type":"session_meta","payload":{"cwd":"/tmp/project"}}
+//! {"type":"event_msg","payload":{"type":"user_message","message":"Build a parser"}}
+//! {"type":"response","payload":{"usage":{"input_tokens":500}}}
+//! "#;
+//!
+//! let output = extract_jsonl_str(
+//!     AgentTool::Codex,
+//!     "inline",
+//!     jsonl,
+//!     Path::new("/tmp/project"),
+//!     false,
+//!     &ExtractOptions::default(),
+//! ).unwrap();
+//!
+//! assert_eq!(output.schema_version, "clawgs.v2");
+//! assert_eq!(output.snapshot.user_task.as_deref(), Some("Build a parser"));
+//! assert!(output.stats.events_seen > 0);
+//! ```
+//!
+//! # CLI
+//!
+//! The `clawgs` binary exposes the same functionality via subcommands. See the
+//! [README](https://github.com/build000r/clawgs) for CLI usage.
+
+#![warn(missing_docs)]
+
 pub mod emit;
 pub mod parsers;
 pub mod tmux;
@@ -17,13 +55,17 @@ use parsers::ParseSnapshot;
 
 const SCHEMA_VERSION: &str = "clawgs.v2";
 
+/// Supported agent transcript sources.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentTool {
+    /// Claude Code JSONL transcripts.
     Claude,
+    /// OpenAI Codex JSONL transcripts.
     Codex,
 }
 
 impl AgentTool {
+    /// Returns the lowercase tool name (`"claude"` or `"codex"`).
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Claude => "claude",
@@ -32,18 +74,27 @@ impl AgentTool {
     }
 }
 
+/// CLI-level tool selection before resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolSelection {
+    /// Infer from the newest available transcript.
     Auto,
+    /// Force Claude Code parser.
     Claude,
+    /// Force Codex parser.
     Codex,
 }
 
+/// Output-shaping limits for [`extract`] and [`extract_jsonl_str`].
 #[derive(Debug, Clone)]
 pub struct ExtractOptions {
+    /// Maximum recent actions retained in the snapshot.
     pub max_actions: usize,
+    /// Character budget for the user task field.
     pub max_task_chars: usize,
+    /// Character budget for per-action detail strings.
     pub max_detail_chars: usize,
+    /// When `true`, include the last 20 raw transcript events.
     pub include_raw: bool,
 }
 
@@ -58,22 +109,33 @@ impl Default for ExtractOptions {
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+/// A single agent action observed in the transcript.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Action {
+    /// The tool or function name invoked (e.g. `"exec_command"`).
     pub tool: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Optional human-readable detail (command text, file path, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Action category (`"tool_call"`, `"edit"`, etc.).
     pub kind: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// ISO 8601 timestamp when the action was observed, if available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ts: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+/// Commit-readiness signals derived from transcript events.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommitSignal {
+    /// `true` when all four observations indicate a commit is ready.
     pub candidate: bool,
+    /// An edit (file write, patch) was observed.
     pub edited: bool,
+    /// A validation step (test, lint, type-check) succeeded after the edit.
     pub validated: bool,
+    /// A dirty-tree check ran after the latest edit.
     pub dirty_checked: bool,
+    /// A commit was observed after the latest edit (clears candidate).
     pub commit_seen: bool,
 }
 
@@ -86,12 +148,18 @@ impl CommitSignal {
     }
 }
 
+/// A transcript-derived attention fact for downstream consumers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActionCue {
+    /// What the cue signals (e.g. commit readiness, awaiting user).
     pub kind: ActionCueKind,
+    /// Current cue state (currently always `Active`).
     pub status: ActionCueStatus,
+    /// Where the cue was derived from (currently always `Transcript`).
     pub source: ActionCueSource,
+    /// Confidence level of the derivation.
     pub confidence: ActionCueConfidence,
+    /// Evidence tags supporting this cue.
     pub evidence: Vec<String>,
 }
 
@@ -109,6 +177,7 @@ impl ActionCue {
         }
     }
 
+    /// Returns the canonical evidence tags for the given cue kind.
     pub fn expected_evidence(kind: ActionCueKind) -> &'static [&'static str] {
         match kind {
             ActionCueKind::AwaitingUser => &["awaiting_user_input"],
@@ -132,6 +201,7 @@ impl ActionCue {
         }
     }
 
+    /// `true` when the evidence tags exactly match the expected set for this cue's kind.
     pub fn has_expected_evidence(&self) -> bool {
         let expected = Self::expected_evidence(self.kind);
         self.evidence.len() == expected.len()
@@ -142,6 +212,7 @@ impl ActionCue {
                 .all(|(actual, expected)| actual == expected)
     }
 
+    /// `true` when this cue carries complete, matching evidence.
     pub fn is_valid(&self) -> bool {
         self.has_expected_evidence()
     }
@@ -161,16 +232,22 @@ impl ActionCue {
     }
 }
 
+/// The kind of attention fact an [`ActionCue`] represents.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionCueKind {
+    /// The agent is waiting for user input.
     AwaitingUser,
+    /// An edit was validated and the tree is dirty — ready to commit.
     CommitReady,
+    /// An edit occurred but no validation step has been observed yet.
     ValidationMissingAfterEdit,
+    /// An edit was validated but no dirty-tree check has been observed.
     DirtyCheckMissing,
 }
 
 impl ActionCueKind {
+    /// Returns the snake_case wire name for this cue kind.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::AwaitingUser => "awaiting_user",
@@ -181,75 +258,112 @@ impl ActionCueKind {
     }
 }
 
+/// Whether an [`ActionCue`] is currently active.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionCueStatus {
+    /// The cue is currently active.
     Active,
 }
 
+/// Where an [`ActionCue`] was derived from.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionCueSource {
+    /// Derived from transcript event analysis.
     Transcript,
 }
 
+/// Confidence level of an [`ActionCue`] derivation.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionCueConfidence {
+    /// All evidence is deterministic (no heuristic or probabilistic component).
     Deterministic,
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// Normalized session state extracted from a transcript.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The user's original task or prompt, truncated to [`ExtractOptions::max_task_chars`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_task: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The most recent tool invocation still in progress, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_tool: Option<Action>,
+    /// Cumulative input token count observed in the transcript.
     pub token_count: u64,
+    /// `true` when the agent is waiting for user input.
     #[serde(default, skip_serializing_if = "is_false")]
     pub awaiting_user_input: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The text the agent displayed when requesting user input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awaiting_user_text: Option<String>,
+    /// The most recent actions, newest last, capped at [`ExtractOptions::max_actions`].
+    #[serde(default)]
     pub recent_actions: Vec<Action>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Commit-readiness signals, present when any edit was observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_signal: Option<CommitSignal>,
+    /// Transcript-derived attention facts for downstream consumers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub action_cues: Vec<ActionCue>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// Metadata about the transcript file that was parsed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {
+    /// Which parser was used (`"claude"` or `"codex"`).
     pub tool: String,
+    /// File path or `"embedded:..."` for demo transcripts.
     pub path: String,
+    /// `true` when the transcript was found by discovery rather than `--input`.
     pub discovered: bool,
+    /// Working directory the transcript was associated with.
     pub cwd: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// Parse statistics from transcript extraction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Stats {
+    /// Total JSONL events processed.
     pub events_seen: u64,
+    /// Lines skipped due to parse errors.
     pub malformed_lines_skipped: u64,
+    /// Total bytes read from the transcript file.
     pub bytes_read: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// The full `clawgs.v2` extraction result: source metadata, normalized snapshot, and parse stats.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractOutput {
+    /// Always `"clawgs.v2"`.
     pub schema_version: String,
+    /// Metadata about the parsed transcript file.
     pub source: Source,
+    /// The normalized session state.
     pub snapshot: Snapshot,
+    /// Parse statistics.
     pub stats: Stats,
+    /// ISO 8601 timestamp when extraction ran.
     pub generated_at: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Raw transcript events, present only when `include_raw` was set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_events: Option<Vec<Value>>,
 }
 
+/// A transcript file resolved by discovery or explicit `--input` path.
 #[derive(Debug, Clone)]
 pub struct ResolvedInput {
+    /// Which parser applies to this transcript.
     pub tool: AgentTool,
+    /// Filesystem path to the JSONL transcript.
     pub path: PathBuf,
+    /// `true` when found by discovery, `false` when passed via `--input`.
     pub discovered: bool,
 }
 
+/// Resolve a transcript file from an explicit path or by discovery under `cwd`.
 pub fn resolve_input(
     selection: ToolSelection,
     cwd: &Path,
@@ -278,6 +392,7 @@ pub fn resolve_input(
     Ok(resolved)
 }
 
+/// Parse a JSONL transcript file into a `clawgs.v2` [`ExtractOutput`].
 pub fn extract(
     tool: AgentTool,
     path: &Path,
@@ -289,14 +404,53 @@ pub fn extract(
         AgentTool::Claude => parsers::claude::parse(path, options)?,
         AgentTool::Codex => parsers::codex::parse(path, options)?,
     };
+    Ok(extract_output(
+        tool,
+        path.display().to_string(),
+        cwd,
+        discovered,
+        parsed,
+    ))
+}
+
+/// Parse a JSONL string in memory into a `clawgs.v2` [`ExtractOutput`].
+pub fn extract_jsonl_str(
+    tool: AgentTool,
+    source_path: &str,
+    input: &str,
+    cwd: &Path,
+    discovered: bool,
+    options: &ExtractOptions,
+) -> Result<ExtractOutput> {
+    let parsed: ParseSnapshot = match tool {
+        AgentTool::Claude => parsers::claude::parse_str(input, options)?,
+        AgentTool::Codex => parsers::codex::parse_str(input, options)?,
+    };
+
+    Ok(extract_output(
+        tool,
+        source_path.to_string(),
+        cwd,
+        discovered,
+        parsed,
+    ))
+}
+
+fn extract_output(
+    tool: AgentTool,
+    source_path: String,
+    cwd: &Path,
+    discovered: bool,
+    parsed: ParseSnapshot,
+) -> ExtractOutput {
     let action_cues =
         action_cues_for_snapshot(parsed.commit_signal.as_ref(), parsed.awaiting_user_input);
 
-    Ok(ExtractOutput {
+    ExtractOutput {
         schema_version: SCHEMA_VERSION.to_string(),
         source: Source {
             tool: tool.as_str().to_string(),
-            path: path.display().to_string(),
+            path: source_path,
             discovered,
             cwd: cwd.display().to_string(),
         },
@@ -317,7 +471,7 @@ pub fn extract(
         },
         generated_at: Utc::now().to_rfc3339(),
         raw_events: parsed.raw_events,
-    })
+    }
 }
 
 pub(crate) fn action_cues_for_snapshot(
@@ -330,25 +484,34 @@ pub(crate) fn action_cues_for_snapshot(
         cues.push(ActionCue::active(ActionCueKind::AwaitingUser));
     }
 
-    let Some(signal) = commit_signal else {
-        return cues;
-    };
-
-    if signal.candidate {
-        cues.push(ActionCue::active(ActionCueKind::CommitReady));
-    } else if signal.edited && !signal.validated && !signal.commit_seen {
-        cues.push(ActionCue::active(ActionCueKind::ValidationMissingAfterEdit));
-    } else if signal.edited && signal.validated && !signal.dirty_checked && !signal.commit_seen {
-        cues.push(ActionCue::active(ActionCueKind::DirtyCheckMissing));
+    if let Some(kind) = commit_signal.and_then(commit_signal_action_cue_kind) {
+        cues.push(ActionCue::active(kind));
     }
 
     cues
+}
+
+fn commit_signal_action_cue_kind(signal: &CommitSignal) -> Option<ActionCueKind> {
+    if signal.candidate {
+        return Some(ActionCueKind::CommitReady);
+    }
+
+    if !signal.edited || signal.commit_seen {
+        return None;
+    }
+
+    if !signal.validated {
+        return Some(ActionCueKind::ValidationMissingAfterEdit);
+    }
+
+    (!signal.dirty_checked).then_some(ActionCueKind::DirtyCheckMissing)
 }
 
 fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// Read the first 40 lines of a JSONL file and infer whether it is a Claude or Codex transcript.
 pub fn infer_tool_from_file(path: &Path) -> Result<AgentTool> {
     let file = fs::File::open(path).with_context(|| {
         format!(
@@ -378,6 +541,7 @@ pub fn infer_tool_from_file(path: &Path) -> Result<AgentTool> {
     ))
 }
 
+/// Discover the newest transcript for `tool` under the default log directory for `cwd`.
 pub fn discover_for_tool(cwd: &Path, tool: AgentTool) -> Result<ResolvedInput> {
     discovered_path_for_tool(cwd, tool)
         .map(|path| discovered_input(tool, path))
@@ -391,6 +555,7 @@ pub fn discover_for_tool(cwd: &Path, tool: AgentTool) -> Result<ResolvedInput> {
         })
 }
 
+/// Auto-discover the newest Claude or Codex transcript matching `cwd`.
 pub fn discover_auto(cwd: &Path) -> Result<ResolvedInput> {
     match (discover_claude_path(cwd), discover_codex_path(cwd)) {
         (Some(path), None) => Ok(discovered_input(AgentTool::Claude, path)),
@@ -405,10 +570,12 @@ pub fn discover_auto(cwd: &Path) -> Result<ResolvedInput> {
     }
 }
 
+/// Return the newest Claude transcript path for `cwd`, if any.
 pub fn discover_claude_path(cwd: &Path) -> Option<PathBuf> {
     discover_claude_paths(cwd).into_iter().next()
 }
 
+/// Return all Claude transcript paths for `cwd`, newest first.
 pub fn discover_claude_paths(cwd: &Path) -> Vec<PathBuf> {
     let Some(home) = home_dir() else {
         return Vec::new();
@@ -437,10 +604,12 @@ pub fn discover_claude_paths(cwd: &Path) -> Vec<PathBuf> {
     files.into_iter().map(|(path, _)| path).collect()
 }
 
+/// Return the newest Codex transcript path for `cwd`, if any.
 pub fn discover_codex_path(cwd: &Path) -> Option<PathBuf> {
     discover_codex_paths(cwd).into_iter().next()
 }
 
+/// Return all Codex transcript paths for `cwd`, newest first.
 pub fn discover_codex_paths(cwd: &Path) -> Vec<PathBuf> {
     let Some(home) = home_dir() else {
         return Vec::new();
@@ -452,6 +621,7 @@ pub fn discover_codex_paths(cwd: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Like [`discover_claude_path`] but skips paths in `excluded` (used by tmux-emit to avoid reusing claimed transcripts).
 pub fn discover_claude_path_excluding(cwd: &Path, excluded: &HashSet<PathBuf>) -> Option<PathBuf> {
     discover_claude_paths(cwd)
         .into_iter()
@@ -465,6 +635,7 @@ fn claude_file_matches_cwd(path: &Path, cwd: &Path) -> bool {
         .is_some_and(|reader| reader_matches_or_lacks_cwd(reader, &cwd.display().to_string()))
 }
 
+/// Like [`discover_codex_path`] but skips paths in `excluded`.
 pub fn discover_codex_path_excluding(cwd: &Path, excluded: &HashSet<PathBuf>) -> Option<PathBuf> {
     discover_codex_paths(cwd)
         .into_iter()
@@ -729,6 +900,34 @@ mod tests {
 
         let tool = infer_tool_from_file(file.path()).expect("infer tool");
         assert_eq!(tool, AgentTool::Claude);
+    }
+
+    #[test]
+    fn extract_jsonl_str_uses_virtual_source_and_preserves_stats() {
+        let input = concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/demo\"}}\n",
+            "not-json\n",
+            "{\"type\":\"response_item\",\"payload\":{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Build a parser\"}]}}\n"
+        );
+
+        let output = extract_jsonl_str(
+            AgentTool::Codex,
+            "embedded:test.jsonl",
+            input,
+            std::path::Path::new("/demo"),
+            false,
+            &ExtractOptions::default(),
+        )
+        .expect("extract from string");
+
+        assert_eq!(output.source.tool, "codex");
+        assert_eq!(output.source.path, "embedded:test.jsonl");
+        assert!(!output.source.discovered);
+        assert_eq!(output.source.cwd, "/demo");
+        assert_eq!(output.snapshot.user_task.as_deref(), Some("Build a parser"));
+        assert_eq!(output.stats.events_seen, 2);
+        assert_eq!(output.stats.malformed_lines_skipped, 1);
+        assert_eq!(output.stats.bytes_read, input.len() as u64);
     }
 
     #[test]
@@ -1406,5 +1605,28 @@ mod tests {
 
         assert_eq!(resolved.tool, AgentTool::Codex);
         assert_eq!(resolved.path, codex_file);
+    }
+
+    #[test]
+    fn extract_output_roundtrips_through_json() {
+        let jsonl = concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/test\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"hello\"}}\n",
+            "{\"type\":\"response\",\"payload\":{\"usage\":{\"input_tokens\":42}}}\n",
+        );
+        let output = extract_jsonl_str(
+            AgentTool::Codex,
+            "roundtrip-test",
+            jsonl,
+            std::path::Path::new("/tmp/test"),
+            false,
+            &ExtractOptions::default(),
+        )
+        .expect("extract");
+        let json = serde_json::to_string(&output).expect("serialize");
+        let back: ExtractOutput = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.schema_version, output.schema_version);
+        assert_eq!(back.snapshot.user_task, output.snapshot.user_task);
+        assert_eq!(back.stats.events_seen, output.stats.events_seen);
     }
 }

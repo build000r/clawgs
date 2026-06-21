@@ -31,6 +31,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
       - name: Validate tag matches Cargo version
         run: |
           set -euo pipefail
@@ -88,6 +91,9 @@ jobs:
             '^\.ubs(/|$)'
             '^\.drift(/|$)'
             '^\.apr(/|$)'
+            '^memory(/|$)'
+            '^diagrams(/|$)'
+            '^AGENTS\.md$'
             '(^|/)\.env$'
             '(^|/)[^/]+\.bak$'
             '(^|/)\.DS_Store$'

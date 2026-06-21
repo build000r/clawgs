@@ -2,6 +2,7 @@
 
 <div align="center">
 
+[![CI](https://github.com/build000r/clawgs/actions/workflows/ci.yml/badge.svg)](https://github.com/build000r/clawgs/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/build000r/clawgs/blob/main/LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![crates.io](https://img.shields.io/crates/v/clawgs.svg)](https://crates.io/crates/clawgs)
@@ -80,6 +81,49 @@ target/release/clawgs demo extract --tool codex --pretty
 ```
 
 Protocol details live in [references/emit-protocol-v2.md](https://github.com/build000r/clawgs/blob/main/references/emit-protocol-v2.md), with a machine-validatable JSON Schema at [references/clawgs.emit.v2.schema.json](https://github.com/build000r/clawgs/blob/main/references/clawgs.emit.v2.schema.json). The extract schema lives in [references/schema-v2.md](https://github.com/build000r/clawgs/blob/main/references/schema-v2.md), with JSON Schema at [references/clawgs.v2.schema.json](https://github.com/build000r/clawgs/blob/main/references/clawgs.v2.schema.json).
+
+### Library Usage
+
+Add `clawgs` as a dependency:
+
+```toml
+[dependencies]
+clawgs = "0.3"
+```
+
+Parse a JSONL string into a typed snapshot:
+
+```rust
+use std::path::Path;
+use clawgs::{AgentTool, ExtractOptions, extract_jsonl_str};
+
+let jsonl = r#"{"type":"session_meta","payload":{"cwd":"/tmp/project"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"Build a parser"}}
+{"type":"response","payload":{"usage":{"input_tokens":500}}}
+"#;
+
+let output = extract_jsonl_str(
+    AgentTool::Codex,
+    "inline",
+    jsonl,
+    Path::new("/tmp/project"),
+    false,
+    &ExtractOptions::default(),
+).unwrap();
+
+assert_eq!(output.schema_version, "clawgs.v2");
+assert_eq!(output.snapshot.user_task.as_deref(), Some("Build a parser"));
+```
+
+Core output types (`ExtractOutput`, `Snapshot`, `Action`, `Source`, `Stats`,
+`CommitSignal`) derive both `Serialize` and `Deserialize`, so you can save and
+reload extraction results:
+
+```rust
+let json = serde_json::to_string(&output).unwrap();
+let restored: clawgs::ExtractOutput = serde_json::from_str(&json).unwrap();
+assert_eq!(restored.schema_version, "clawgs.v2");
+```
 
 ### Transcript Discovery
 
@@ -313,6 +357,7 @@ Prints resolved daemon defaults as JSON.
 
 ```bash
 target/release/clawgs defaults
+target/release/clawgs defaults --pretty
 ```
 
 ## Configuration

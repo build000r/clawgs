@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use serde_json::Value;
 use tempfile::TempDir;
@@ -130,6 +130,48 @@ fn demo_emit_outputs_canonical_exchange_without_backends() {
 }
 
 #[test]
+fn demo_emit_exits_cleanly_when_pipe_reader_closes() {
+    let home = TempDir::new().expect("temp home");
+    let cwd = TempDir::new().expect("temp cwd");
+    let mut clawgs = Command::new(env!("CARGO_BIN_EXE_clawgs"))
+        .arg("demo")
+        .arg("emit")
+        .arg("--pretty")
+        .current_dir(cwd.path())
+        .env("HOME", home.path())
+        .env("CLAWGS_MODEL_BACKEND", "openrouter")
+        .env_remove("OPENROUTER_API_KEY")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn clawgs demo emit");
+
+    let stdout = clawgs.stdout.take().expect("stdout should be piped");
+    let head = Command::new("head")
+        .arg("-n")
+        .arg("1")
+        .stdin(Stdio::from(stdout))
+        .output()
+        .expect("failed to run head");
+
+    assert!(head.status.success(), "head should read one line");
+
+    let output = clawgs
+        .wait_with_output()
+        .expect("failed to wait for clawgs");
+    assert!(
+        output.status.success(),
+        "command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "broken pipe should not print stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn demo_extract_rejects_invalid_tool_values() {
     let output = run_demo(&["extract", "--tool", "invalid"]);
 
@@ -147,4 +189,35 @@ fn demo_extract_preserves_limit_validation() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
     assert!(stderr.contains("--max-actions must be greater than 0"));
+}
+
+fn run_defaults(args: &[&str]) -> std::process::Output {
+    let home = TempDir::new().expect("temp home");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_clawgs"));
+    command.arg("defaults").args(args).env("HOME", home.path());
+    command.output().expect("failed to run clawgs defaults")
+}
+
+#[test]
+fn defaults_outputs_valid_json_with_expected_fields() {
+    let output = run_defaults(&[]);
+    assert!(output.status.success());
+    let json: Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert!(json.get("backend").is_some(), "missing backend field");
+    assert!(json.get("agent_prompt").is_some(), "missing agent_prompt");
+    assert!(
+        json.get("terminal_prompt").is_some(),
+        "missing terminal_prompt"
+    );
+    assert!(json.get("model").is_some(), "missing model field");
+}
+
+#[test]
+fn defaults_pretty_outputs_multiline_json() {
+    let output = run_defaults(&["--pretty"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("utf8");
+    assert!(stdout.contains('\n'), "pretty output should be multiline");
+    let json: Value = serde_json::from_str(&stdout).expect("valid json");
+    assert!(json.get("backend").is_some());
 }

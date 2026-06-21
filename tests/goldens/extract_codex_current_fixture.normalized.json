@@ -1,0 +1,62 @@
+{
+  "schema_version": "clawgs.v2",
+  "source": {
+    "tool": "codex",
+    "path": "tests/fixtures/codex-current.jsonl",
+    "discovered": false,
+    "cwd": "/tmp/project"
+  },
+  "snapshot": {
+    "user_task": "Ship preview-first widget fix",
+    "current_tool": {
+      "tool": "exec_command",
+      "detail": "cargo test --manifest-path clawgs/Cargo.toml codex -- --nocapture",
+      "kind": "function_call"
+    },
+    "token_count": 144379,
+    "recent_actions": [
+      {
+        "tool": "exec_command",
+        "detail": "git status --short",
+        "kind": "function_call"
+      },
+      {
+        "tool": "apply_patch",
+        "detail": "widget.tsx",
+        "kind": "function_call"
+      },
+      {
+        "tool": "exec_command",
+        "detail": "cargo test --manifest-path clawgs/Cargo.toml codex -- --nocapture",
+        "kind": "function_call"
+      }
+    ],
+    "commit_signal": {
+      "candidate": false,
+      "edited": true,
+      "validated": true,
+      "dirty_checked": false,
+      "commit_seen": false
+    },
+    "action_cues": [
+      {
+        "kind": "dirty_check_missing",
+        "status": "active",
+        "source": "transcript",
+        "confidence": "deterministic",
+        "evidence": [
+          "edit_seen",
+          "validation_succeeded",
+          "dirty_tree_check_not_seen_after_latest_edit",
+          "commit_not_seen_after_latest_edit"
+        ]
+      }
+    ]
+  },
+  "stats": {
+    "events_seen": 8,
+    "malformed_lines_skipped": 0,
+    "bytes_read": 1389
+  },
+  "generated_at": "<generated_at>"
+}

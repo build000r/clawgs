@@ -1,8 +1,6 @@
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{Duration, TimeZone, Utc};
 use serde::Serialize;
 
@@ -13,8 +11,8 @@ use clawgs::emit::protocol::{
     ThoughtConfig, ThoughtSource, ThoughtState,
 };
 use clawgs::{
-    extract, ActionCue, ActionCueConfidence, ActionCueKind, ActionCueSource, ActionCueStatus,
-    AgentTool, ExtractOptions, ExtractOutput,
+    extract_jsonl_str, ActionCue, ActionCueConfidence, ActionCueKind, ActionCueSource,
+    ActionCueStatus, AgentTool, ExtractOptions, ExtractOutput,
 };
 
 const CLAUDE_SAMPLE_PATH: &str = "embedded:examples/demo/claude-sample.jsonl";
@@ -43,14 +41,14 @@ pub struct EmitDemoOutput {
 
 pub fn build_extract_demo(tool: AgentTool, options: ExtractOptions) -> Result<ExtractDemoOutput> {
     let sample = embedded_extract_sample(tool);
-    let temp_path = write_demo_temp_file(sample.file_name, sample.input)?;
-    let output = extract(tool, &temp_path, Path::new(sample.cwd), false, &options);
-    let _ = fs::remove_file(&temp_path);
-
-    let mut output = output?;
-    output.source.path = sample.input_path.to_string();
-    output.source.cwd = sample.cwd.to_string();
-    output.source.discovered = false;
+    let output = extract_jsonl_str(
+        tool,
+        sample.input_path,
+        sample.input,
+        Path::new(sample.cwd),
+        false,
+        &options,
+    )?;
 
     Ok(ExtractDemoOutput {
         demo: "extract",
@@ -81,7 +79,6 @@ pub fn build_emit_demo() -> EmitDemoOutput {
 }
 
 struct EmbeddedExtractSample {
-    file_name: &'static str,
     input_path: &'static str,
     input: &'static str,
     cwd: &'static str,
@@ -90,32 +87,16 @@ struct EmbeddedExtractSample {
 fn embedded_extract_sample(tool: AgentTool) -> EmbeddedExtractSample {
     match tool {
         AgentTool::Claude => EmbeddedExtractSample {
-            file_name: "claude-sample.jsonl",
             input_path: CLAUDE_SAMPLE_PATH,
             input: CLAUDE_SAMPLE_INPUT,
             cwd: "/demo/claude-project",
         },
         AgentTool::Codex => EmbeddedExtractSample {
-            file_name: "codex-sample.jsonl",
             input_path: CODEX_SAMPLE_PATH,
             input: CODEX_SAMPLE_INPUT,
             cwd: "/demo/codex-project",
         },
     }
-}
-
-fn write_demo_temp_file(file_name: &str, input: &str) -> Result<PathBuf> {
-    let stamp = format!(
-        "{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    );
-    let path = std::env::temp_dir().join(format!("clawgs-demo-{stamp}-{file_name}"));
-    fs::write(&path, input).with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(path)
 }
 
 fn demo_sync_request() -> SyncRequest {

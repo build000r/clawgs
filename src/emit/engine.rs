@@ -1,3 +1,5 @@
+//! Stateful emit engine that reconciles session snapshots and generates thought updates.
+
 // The emit engine is a state machine whose small helper functions pass the
 // current session, runtime state, request config, and output buffers together.
 // Grouping these into broad mutable context structs makes ownership less clear

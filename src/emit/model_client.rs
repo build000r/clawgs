@@ -1,12 +1,16 @@
+//! Model backend clients (OpenRouter, Grok) for live thought generation.
+
 use std::ffi::OsString;
-use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
 const OPENROUTER_TIMEOUT: Duration = Duration::from_secs(15);
 const OPENROUTER_CHAT_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
@@ -360,6 +364,7 @@ fn unique_stamp() -> String {
     )
 }
 
+#[cfg(unix)]
 fn ensure_private_runtime_dir(path: &Path) -> Result<(), String> {
     if fs::symlink_metadata(path)
         .map(|metadata| metadata.file_type().is_symlink())
@@ -371,7 +376,7 @@ fn ensure_private_runtime_dir(path: &Path) -> Result<(), String> {
         ));
     }
 
-    let mut builder = DirBuilder::new();
+    let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     builder.mode(PRIVATE_RUNTIME_DIR_MODE);
     builder
@@ -379,7 +384,10 @@ fn ensure_private_runtime_dir(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("failed to create {}: {error}", path.display()))?;
 
     let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("failed to stat {}: {error}", path.display()))?;
+        .map_err(|error| format!("failed to inspect {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!("refusing symlink runtime dir {}", path.display()));
+    }
     if !metadata.is_dir() {
         return Err(format!(
             "runtime path is not a directory: {}",
@@ -391,13 +399,21 @@ fn ensure_private_runtime_dir(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("failed to chmod {}: {error}", path.display()))
 }
 
+#[cfg(not(unix))]
+fn ensure_private_runtime_dir(path: &Path) -> Result<(), String> {
+    fs::create_dir_all(path)
+        .map_err(|error| format!("failed to create {}: {error}", path.display()))
+}
+
 fn create_private_file(path: &Path) -> Result<File, String> {
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(PRIVATE_RUNTIME_FILE_MODE)
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(PRIVATE_RUNTIME_FILE_MODE);
+    let file = options
         .open(path)
         .map_err(|error| format!("failed to create {}: {error}", path.display()))?;
+    #[cfg(unix)]
     file.set_permissions(fs::Permissions::from_mode(PRIVATE_RUNTIME_FILE_MODE))
         .map_err(|error| format!("failed to chmod {}: {error}", path.display()))?;
     Ok(file)
@@ -1052,6 +1068,60 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn grok_runtime_paths_are_private_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Duration;
+        use tempfile::tempdir;
+
+        fn mode(path: &std::path::Path) -> u32 {
+            std::fs::metadata(path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let runtime_dir = dir.path().join("runtime");
+        super::ensure_private_runtime_dir(&runtime_dir).expect("runtime dir");
+        assert_eq!(mode(&runtime_dir), 0o700, "runtime dir must be private");
+
+        let prompt_path = runtime_dir.join("prompt.txt");
+        super::write_private_file(&prompt_path, b"status prompt").expect("prompt write");
+        assert_eq!(mode(&prompt_path), 0o600, "prompt file must be private");
+
+        let script = write_fake_backend(
+            dir.path(),
+            concat!(
+                "#!/bin/sh\n",
+                "printf 'backend stdout\\n'\n",
+                "printf 'backend stderr\\n' >&2\n",
+            ),
+        );
+        let stdout_path = runtime_dir.join("stdout.log");
+        let stderr_path = runtime_dir.join("stderr.log");
+        let script_bin = script.to_string_lossy().into_owned();
+
+        let output = run_subprocess_capturing(SubprocessSpec {
+            bin: &script_bin,
+            args: Vec::new(),
+            stdin_payload: b"",
+            stdout_path: &stdout_path,
+            stderr_path: &stderr_path,
+            timeout: Duration::from_secs(5),
+            label: "fake backend",
+        })
+        .expect("subprocess run");
+
+        assert!(output.success);
+        assert_eq!(output.stdout, "backend stdout\n");
+        assert_eq!(output.stderr, "backend stderr\n");
+        assert_eq!(mode(&stdout_path), 0o600, "stdout file must be private");
+        assert_eq!(mode(&stderr_path), 0o600, "stderr file must be private");
+    }
+
     #[test]
     fn command_available_probe_times_out() {
         use std::time::{Duration, Instant};
@@ -1180,6 +1250,8 @@ mod tests {
                 "  esac\n",
                 "done\n",
                 "test -f \"$prompt\" || exit 3\n",
+                "stat -c '%a' \"$(dirname \"$prompt\")\" > \"$(dirname \"$0\")/runtime.mode\"\n",
+                "stat -c '%a' \"$prompt\" > \"$(dirname \"$0\")/prompt.mode\"\n",
                 "grep -q 'status prompt' \"$prompt\" || exit 4\n",
                 "test \"$model\" = 'grok-test-model' || exit 5\n",
                 "printf '   grok ok   \\n'\n",
@@ -1197,6 +1269,21 @@ mod tests {
             .expect("complete should succeed");
 
         assert_eq!(out, "grok ok");
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("runtime.mode"))
+                    .expect("runtime mode")
+                    .trim(),
+                "700"
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("prompt.mode"))
+                    .expect("prompt mode")
+                    .trim(),
+                "600"
+            );
+        }
     }
 
     #[test]

@@ -1,3 +1,5 @@
+//! Wire types for the `clawgs.emit.v2` NDJSON protocol (hello, sync, sync\_result).
+
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 

@@ -3,9 +3,15 @@
   "entry": "main",
   "shortLink": { "username": "buildooor", "slug": "clawgs-project-status" },
   "links": [
-    { "from": "main", "label": "Open proof status", "to": "proof-status", "title": "Open clawgs proof status" },
+    { "from": "main", "label": "Open epic status", "to": "epic-gantt", "title": "Open clawgs epic status" },
+    { "from": "main", "label": "Open epic map", "to": "epic-map", "title": "Open clawgs epic dependency map" },
     { "from": "main", "label": "Open primary flows", "to": "primary-flows", "title": "Open clawgs primary flows" },
-    { "from": "main", "label": "Open next move", "to": "next-move", "title": "Open clawgs next move" }
+    { "from": "main", "label": "Open lifecycle", "to": "lifecycle", "title": "Open clawgs extract/emit lifecycle" },
+    { "from": "main", "label": "Open architecture", "to": "architecture-boundary", "title": "Open clawgs architecture boundary" },
+    { "from": "main", "label": "Open proof status", "to": "proof-status", "title": "Open clawgs proof status" },
+    { "from": "main", "label": "Open drift", "to": "drift", "title": "Open clawgs docs/code/beads drift" },
+    { "from": "main", "label": "Open next move", "to": "next-move", "title": "Open clawgs next move" },
+    { "from": "main", "label": "Open data contract ERD", "to": "erd", "title": "Open clawgs.v2 data contract ERD" }
   ]
 }
 -->
@@ -13,86 +19,296 @@
 ## chart main Clawgs Project Status Crux
 ```mermaid
 flowchart LR
-  vision["clawgs: stable JSON snapshots and live emit protocol"]:::gray
-  tests["GREEN cargo test passed all suites"]:::green
-  install["YELLOW clean crates.io install proof: clawgs-portfolio-reality-idea-plan-v6n.7"]:::yellow
-  downstream["YELLOW swimmers contract drift smoke: clawgs-portfolio-reality-idea-plan-v6n.8"]:::yellow
-  perf["YELLOW transcript and tmux profiling: clawgs-portfolio-reality-idea-plan-v6n.9"]:::yellow
-  vision --> tests --> install --> downstream
-  tests --> perf
+  vision["clawgs: stable clawgs.v2 snapshots + clawgs.emit.v2 live protocol for Claude/Codex sessions (as of 2026-07-05)"]:::gray
+  core["GREEN core extract/emit/parsers/tmux + schema & golden test suites present"]:::green
+  install["GREEN clean-install proof for cargo install --path . (docs/INSTALL.md)"]:::green
+  crates["RED crates.io 0.3.0 not published; 0.2.0 fails without OpenSSL — no covering bead"]:::red
+  growth["YELLOW contract-layer growth flywheel: njl.1 proof, njl.2 receipt, njl.3 starter, njl.4 launch packet"]:::yellow
+  next["Next move: publish first-wow proof (njl.1) then unblock launch packet (njl.4)"]:::gray
+  vision --> core --> install --> crates
+  core --> growth --> next
+  crates --> next
+  class vision gray
+  class core green
+  class install green
+  class crates red
+  class growth yellow
+  class next gray
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+  classDef red fill:#ffd6d6,stroke:#c53030,stroke-width:2px,color:#3a0505
   classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
 ```
 
 ## chart epic-gantt Clawgs Epic Status
 ```mermaid
 gantt
-  title clawgs status as of 2026-05-28
+  title clawgs status as of 2026-07-05
   dateFormat YYYY-MM-DD
   section GREEN Proven
-  GREEN cargo test passed parser emit schema demos :done, 2026-05-28, 1d
-  section YELLOW Planned
-  YELLOW publish status v6n.6 :active, 2026-05-28, 1d
-  YELLOW clean install proof v6n.7 :active, 2026-05-29, 1d
-  YELLOW swimmers drift smoke v6n.8 :active, 2026-05-30, 1d
-  YELLOW profiling and cue refactor v6n.9 v6n.10 :active, 2026-05-31, 2d
+  GREEN core extract/emit/tmux + schema/golden tests present :done, 2026-05-28, 1d
+  GREEN clean-install proof cargo install --path . (INSTALL.md) :done, 2026-06-10, 1d
+  section YELLOW Bead-covered growth
+  YELLOW zero-config first-wow proof njl.1 :active, 2026-07-04, 2d
+  YELLOW privacy-safe contract receipt njl.2 :active, 2026-07-04, 2d
+  YELLOW downstream consumer starter njl.3 :active, 2026-07-04, 2d
+  YELLOW contract-layer launch packet njl.4 (blocked by njl.1-3) :active, 2026-07-06, 2d
+  section RED No Bead
+  RED publish clawgs 0.3.0 to crates.io (portable install) :crit, 2026-07-05, 1d
 ```
 
 ## chart epic-map Clawgs Dependency Map
 ```mermaid
 flowchart TD
-  extract["GREEN Claude and Codex extract contracts"]:::green
-  emit["GREEN emit protocol and stdio tests"]:::green
-  schema["GREEN schema sync and golden tests"]:::green
-  install["YELLOW clean install demo proof v6n.7"]:::yellow
-  swim["YELLOW downstream swimmers smoke depends on install v6n.8"]:::yellow
-  perf["YELLOW large transcript tmux baseline v6n.9"]:::yellow
-  refactor["YELLOW action-cue refactor v6n.10"]:::yellow
-  extract --> schema --> install --> swim
+  extract["GREEN Claude/Codex parsers -> clawgs.v2 (cli_extract, golden_contract)"]:::green
+  emit["GREEN emit protocol + stdio daemon (emit_stdio tests)"]:::green
+  schema["GREEN schema sync + golden tests (schema_sync)"]:::green
+  swim["GREEN downstream swimmers contract test present (tests/downstream_swimmers_contract.rs)"]:::green
+  install["GREEN clean-install proof cargo install --path . (INSTALL.md)"]:::green
+  crates["RED crates.io 0.3.0 publish (no bead)"]:::red
+  proof["YELLOW zero-config first-wow proof njl.1"]:::yellow
+  receipt["YELLOW privacy-safe contract receipt njl.2"]:::yellow
+  starter["YELLOW downstream consumer starter njl.3"]:::yellow
+  packet["YELLOW launch packet njl.4 (blocked by njl.1-3)"]:::yellow
+  extract --> schema --> install --> crates
   emit --> install
-  schema --> perf --> refactor
+  schema --> swim --> starter
+  install --> proof --> packet
+  receipt --> packet
+  starter --> packet
+  class extract green
+  class emit green
+  class schema green
+  class swim green
+  class install green
+  class crates red
+  class proof yellow
+  class receipt yellow
+  class starter yellow
+  class packet yellow
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+  classDef red fill:#ffd6d6,stroke:#c53030,stroke-width:2px,color:#3a0505
 ```
 
 ## chart primary-flows Clawgs Primary Flows
 ```mermaid
 flowchart TD
-  operator["Agent operator or tool author"]:::gray
-  logs["GREEN discover Claude Codex logs"]:::green
-  extract["GREEN normalize to clawgs v2 JSON"]:::green
-  emit["GREEN emit live NDJSON protocol"]:::green
-  downstream["YELLOW prove swimmers consumption v6n.8"]:::yellow
-  operator --> logs --> extract --> emit --> downstream
+  operator["Agent operator or downstream tool author"]:::gray
+  logs["GREEN discover Claude/Codex JSONL logs (cwd-exact discovery)"]:::green
+  extract["GREEN clawgs extract -> clawgs.v2 JSON snapshot"]:::green
+  emit["GREEN clawgs emit --stdio / tmux-emit -> clawgs.emit.v2 NDJSON"]:::green
+  demo["GREEN zero-config demo extract/emit (sanitized fixtures)"]:::green
+  wow["YELLOW screenshotable first-wow proof njl.1"]:::yellow
+  receipt["YELLOW paste-able privacy-safe receipt njl.2"]:::yellow
+  downstream["YELLOW minimal downstream consumer starter njl.3"]:::yellow
+  operator --> logs --> extract --> emit
+  operator --> demo --> wow --> receipt
+  emit --> downstream
+  class operator gray
+  class logs green
+  class extract green
+  class emit green
+  class demo green
+  class wow yellow
+  class receipt yellow
+  class downstream yellow
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+  classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
+```
+
+## chart lifecycle Clawgs Extract/Emit Lifecycle
+```mermaid
+sequenceDiagram
+  participant Op as Operator/Tool
+  participant CLI as clawgs CLI
+  participant Disc as Discovery
+  participant Parse as Parser (claude/codex)
+  participant Emit as Emit Engine
+  participant Back as Grok backend (optional)
+  Op->>CLI: extract / emit --stdio / tmux-emit
+  CLI->>Disc: locate cwd-exact JSONL (or --input)
+  Disc-->>CLI: chosen transcript path
+  CLI->>Parse: normalize JSONL (tolerant of malformed lines)
+  Parse-->>CLI: clawgs.v2 snapshot (action_cues, commit_signal)
+  CLI->>Emit: build clawgs.emit.v2 SessionSnapshot
+  Emit->>Back: optional narration (missing creds -> last_backend_error, not crash)
+  Emit-->>Op: NDJSON status update
+  Note over Emit,Op: GREEN paths covered by emit_stdio/golden/schema_sync tests
+```
+
+## chart architecture-boundary Clawgs Architecture Boundary
+```mermaid
+flowchart TB
+  subgraph inputs["Inputs (read-only, local)"]
+    claude["~/.claude/projects/*.jsonl"]:::gray
+    codex["~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl"]:::gray
+    tmux["tmux panes (tmux-emit)"]:::gray
+  end
+  subgraph crate["clawgs crate (owned)"]
+    parsers["GREEN src/parsers (claude, codex, jsonl helpers)"]:::green
+    emitmod["GREEN src/emit (protocol, engine, model_client)"]:::green
+    tmuxmod["GREEN src/tmux.rs pane scan -> SessionSnapshot"]:::green
+    demo["GREEN src/demo.rs embedded corpus"]:::green
+    refs["GREEN references/*.schema.json + *.md contracts"]:::green
+  end
+  subgraph out["Outputs (contracts, not a platform)"]
+    v2["GREEN clawgs.v2 JSON"]:::green
+    emitv2["GREEN clawgs.emit.v2 NDJSON"]:::green
+  end
+  subgraph ext["External (not owned)"]
+    grok["Grok headless backend (optional narration)"]:::gray
+    swimmers["Downstream Swimmers / tool authors"]:::gray
+    cratesio["RED crates.io publish (0.3.0 pending)"]:::red
+  end
+  claude --> parsers
+  codex --> parsers
+  tmux --> tmuxmod
+  parsers --> v2
+  emitmod --> emitv2
+  tmuxmod --> emitmod
+  refs --> v2
+  emitmod --> grok
+  v2 --> swimmers
+  emitv2 --> swimmers
+  crate --> cratesio
+  class claude gray
+  class codex gray
+  class tmux gray
+  class parsers green
+  class emitmod green
+  class tmuxmod green
+  class demo green
+  class refs green
+  class v2 green
+  class emitv2 green
+  class grok gray
+  class swimmers gray
+  class cratesio red
+  classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
+  classDef red fill:#ffd6d6,stroke:#c53030,stroke-width:2px,color:#3a0505
   classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
 ```
 
 ## chart proof-status Clawgs Proof Status
 ```mermaid
 flowchart TD
-  read["GREEN README and VISION read"]:::green
-  tests["GREEN cargo test passed all reported suites"]:::green
-  install["YELLOW cargo install clean-machine proof not run v6n.7"]:::yellow
-  downstream["YELLOW swimmers contract smoke not run v6n.8"]:::yellow
-  perf["YELLOW no large corpus profile v6n.9"]:::yellow
-  read --> tests --> install --> downstream --> perf
+  read["GREEN README, VISION, INSTALL, schema/emit refs read this session"]:::green
+  suites["GREEN test suites present: cli_demo, cli_extract, emit_stdio, golden_contract, schema_sync, downstream_swimmers_contract"]:::green
+  notrun["GRAY cargo test/clippy NOT re-run this session (disk 94%, no builds) — green claim from AGENTS.md/CHANGELOG"]:::gray
+  install["GREEN clean-install proof for cargo install --path . checked in (docs/INSTALL.md)"]:::green
+  crates["RED portable cargo install clawgs unproven: crates.io still 0.2.0 (OpenSSL break); 0.3.0 unpublished, no bead"]:::red
+  wow["YELLOW zero-config screenshotable first-wow proof missing njl.1"]:::yellow
+  receipt["YELLOW privacy-safe contract receipt not yet defined njl.2"]:::yellow
+  starter["YELLOW downstream consumer starter not yet shipped njl.3"]:::yellow
+  read --> suites --> notrun
+  suites --> install --> crates
+  install --> wow --> receipt --> starter
+  class read green
+  class suites green
+  class notrun gray
+  class install green
+  class crates red
+  class wow yellow
+  class receipt yellow
+  class starter yellow
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+  classDef red fill:#ffd6d6,stroke:#c53030,stroke-width:2px,color:#3a0505
+  classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
+```
+
+## chart drift Clawgs Docs/Code/Beads Drift
+```mermaid
+flowchart TD
+  stale["RED prior stack referenced v6n.7/8/9/10 beads that no longer exist — refreshed to njl.1-4"]:::red
+  changelog["GREEN CHANGELOG 0.3.0 matches code: Grok backend replaced Claude/Codex CLI, emit.v2 accepts grok"]:::green
+  install["GREEN README/INSTALL agree: 0.3.0 fixes install (rustls-tls), crates.io still ships 0.2.0"]:::green
+  gap["RED crates.io publish gap named in docs/scorecard but has NO covering bead"]:::red
+  beads["YELLOW open work = viral contract-layer flywheel njl.1-4 (created 2026-07-04)"]:::yellow
+  stale --> beads
+  changelog --> install --> gap
+  gap --> beads
+  class stale red
+  class changelog green
+  class install green
+  class gap red
+  class beads yellow
+  classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
+  classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+  classDef red fill:#ffd6d6,stroke:#c53030,stroke-width:2px,color:#3a0505
 ```
 
 ## chart next-move Clawgs Next Move
 ```mermaid
 flowchart TD
-  rank["Power-map: customer is tool author needing stable agent-session state contract"]:::gray
-  one["1 clean install demo proof v6n.7"]:::yellow
-  two["2 downstream swimmers contract smoke v6n.8"]:::yellow
-  three["3 profile large transcript and tmux scan v6n.9"]:::yellow
-  four["4 refactor action-cue protocol handling v6n.10"]:::yellow
+  rank["Power-map: customer is a downstream tool author needing a stable, private-safe agent-session contract"]:::gray
+  one["1 YELLOW ship zero-config first-wow proof njl.1 (ready)"]:::yellow
+  two["2 YELLOW define privacy-safe contract receipt njl.2 (ready)"]:::yellow
+  three["3 YELLOW add minimal downstream consumer starter njl.3 (ready)"]:::yellow
+  four["4 YELLOW assemble launch packet njl.4 (blocked by njl.1-3)"]:::yellow
+  five["5 RED create+execute a bead to publish 0.3.0 to crates.io (no bead today)"]:::red
   rank --> one --> two --> three --> four
+  rank --> five
+  class rank gray
+  class one yellow
+  class two yellow
+  class three yellow
+  class four yellow
+  class five red
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+  classDef red fill:#ffd6d6,stroke:#c53030,stroke-width:2px,color:#3a0505
   classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
 ```
 
+## chart erd Clawgs.v2 Data Contract ERD
+```mermaid
+erDiagram
+  EXTRACT ||--|| SOURCE : has
+  EXTRACT ||--|| SNAPSHOT : has
+  EXTRACT ||--|| STATS : has
+  SNAPSHOT ||--o| ACTION : "current_tool"
+  SNAPSHOT ||--o{ ACTION : "recent_actions"
+  SNAPSHOT ||--o| COMMITSIGNAL : "commit_signal (codex)"
+  SNAPSHOT ||--o{ ACTIONCUE : "action_cues"
+  EXTRACT {
+    string schema_version "GREEN fixed clawgs.v2"
+    string generated_at "ISO-8601 UTC"
+    array raw_events "optional --include-raw"
+  }
+  SOURCE {
+    string tool "claude|codex"
+    string path
+    bool discovered
+    string cwd
+  }
+  SNAPSHOT {
+    string user_task
+    number token_count
+    bool awaiting_user_input
+  }
+  STATS {
+    number events_seen
+    number malformed_lines_skipped
+    number bytes_read
+  }
+  ACTION {
+    string tool
+    string detail
+    string kind "tool_use|text|thinking|function_call|other"
+    string ts
+  }
+  COMMITSIGNAL {
+    bool candidate
+    bool edited
+    bool validated
+    bool dirty_checked
+    bool commit_seen
+  }
+  ACTIONCUE {
+    string kind "awaiting_user|commit_ready|validation_missing_after_edit|dirty_check_missing"
+    string status "active"
+    string confidence "deterministic"
+  }
+```

@@ -1,0 +1,30 @@
+{
+  "protocol_version": "repo-validation-commands/v1",
+  "source": "Cargo workspace closeout",
+  "commands": [
+    {
+      "id": "fmt",
+      "cwd": ".",
+      "command": "cargo fmt --all -- --check",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "clippy",
+      "cwd": ".",
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "test",
+      "cwd": ".",
+      "command": "cargo test --workspace",
+      "timeout_seconds": 1800
+    },
+    {
+      "id": "diff-check",
+      "cwd": ".",
+      "command": "git diff --check",
+      "timeout_seconds": 300
+    }
+  ]
+}

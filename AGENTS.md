@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Project Shape
-- `clawgs` is a Rust 2021 CLI/library crate (`rust-version = 1.85`) for normalizing Claude Code and Codex JSONL transcripts into `clawgs.v2` snapshots and emitting live `clawgs.emit.v2` NDJSON status updates.
+- `clawgs` is a Rust 2021 CLI/library crate (`rust-version = 1.88`) for normalizing Claude Code and Codex JSONL transcripts into `clawgs.v2` snapshots and emitting live `clawgs.emit.v2` NDJSON status updates.
 - CLI entry point: `src/main.rs`, with subcommands `demo`, `extract`, `emit --stdio`, `tmux-emit`, `tmux-notify`, `claude-hook-notify`, and `defaults`.
 - Library entry point: `src/lib.rs`, exporting transcript discovery, extraction, parsers, emit protocol/engine, and tmux scanning.
 - Public contracts are documented in `references/schema-v2.md` and `references/emit-protocol-v2.md`; keep schema/protocol changes deliberate and tested.

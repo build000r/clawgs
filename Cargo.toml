@@ -2,7 +2,7 @@
 name = "clawgs"
 version = "0.3.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["build000r <buildooor@gmail.com>"]
 description = "Extract structured JSON snapshots from Claude Code and Codex JSONL transcripts"
 license = "MIT"

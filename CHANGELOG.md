@@ -21,6 +21,12 @@ keeps the public `clawgs.v2` extract schema compatible and extends
 `clawgs.emit.v2` additively while making live emit backend behavior, session
 delta facts, and Claude Code hook wake-ups explicit.
 
+### Build requirements
+
+- Require Rust 1.88 and pin CI/release verification to 1.88.0, matching the
+  existing locked dependencies (including `time 0.3.47`). Dependency versions
+  are unchanged.
+
 ### Live Backend
 
 - Add optional `last_input_started_at` to emitter session requests and

@@ -227,6 +227,10 @@ pub struct SessionSnapshot {
     pub token_count: u64,
     pub context_limit: u64,
     pub last_activity_at: DateTime<Utc>,
+    /// Conservative input-coverage bound, distinct from output activity.
+    /// May include recovered uncertain input or a legacy bootstrap fence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_input_started_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub rest_state: RestState,
     #[serde(default)]
@@ -778,9 +782,30 @@ mod tests {
             token_count: 12,
             context_limit: 100,
             last_activity_at: now,
+            last_input_started_at: None,
             commit_candidate: false,
             action_cues: Vec::new(),
         }
+    }
+
+    #[test]
+    fn input_start_watermark_is_optional_and_preserves_exact_time() {
+        let mut session = sample_session();
+        let legacy = serde_json::to_value(&session).unwrap();
+        assert!(legacy.get("last_input_started_at").is_none());
+        assert_eq!(
+            serde_json::from_value::<SessionSnapshot>(legacy).unwrap(),
+            session
+        );
+        session.last_input_started_at = Some(session.last_activity_at);
+        let encoded = serde_json::to_value(&session).unwrap();
+        assert_eq!(
+            serde_json::from_value::<SessionSnapshot>(encoded.clone()).unwrap(),
+            session
+        );
+        let mut malformed = encoded;
+        malformed["last_input_started_at"] = serde_json::json!("not-a-timestamp");
+        assert!(serde_json::from_value::<SessionSnapshot>(malformed).is_err());
     }
 
     #[test]
@@ -1085,8 +1110,7 @@ mod tests {
             };
             assert!(
                 cfg.validate().is_ok(),
-                "backend {:?} should be valid",
-                backend
+                "backend {backend:?} should be valid"
             );
         }
     }

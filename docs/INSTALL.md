@@ -150,7 +150,7 @@ credentials and no tmux. Abridged:
 
 ## Reproduce
 
-From a clean checkout with Rust 1.85+:
+From a clean checkout with Rust 1.88+:
 
 ```bash
 # Validation

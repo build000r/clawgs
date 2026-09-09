@@ -47,7 +47,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{anyhow, Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -299,6 +299,9 @@ pub struct Snapshot {
     /// The text the agent displayed when requesting user input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awaiting_user_text: Option<String>,
+    /// Timestamp of the latest genuine user turn; missing timestamps remain unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_user_turn_at: Option<DateTime<Utc>>,
     /// The most recent actions, newest last, capped at [`ExtractOptions::max_actions`].
     #[serde(default)]
     pub recent_actions: Vec<Action>,
@@ -460,6 +463,7 @@ fn extract_output(
             token_count: parsed.token_count,
             awaiting_user_input: parsed.awaiting_user_input,
             awaiting_user_text: parsed.awaiting_user_text,
+            last_user_turn_at: parsed.last_user_turn_at,
             recent_actions: parsed.recent_actions,
             commit_signal: parsed.commit_signal,
             action_cues,

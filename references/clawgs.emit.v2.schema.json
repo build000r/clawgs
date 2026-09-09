@@ -236,6 +236,10 @@
           "type": "string",
           "format": "date-time"
         },
+        "last_input_started_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
         "rest_state": {
           "$ref": "#/$defs/rest_state"
         },

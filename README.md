@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/build000r/clawgs/actions/workflows/ci.yml/badge.svg)](https://github.com/build000r/clawgs/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/build000r/clawgs/blob/main/LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.88%2B-orange.svg)](https://www.rust-lang.org/)
 [![crates.io](https://img.shields.io/crates/v/clawgs.svg)](https://crates.io/crates/clawgs)
 [![Protocol](https://img.shields.io/badge/protocol-clawgs.emit.v2-blue.svg)](https://github.com/build000r/clawgs/blob/main/references/emit-protocol-v2.md)
 
@@ -74,7 +74,7 @@ Or build from source:
 
 ```bash
 git clone https://github.com/build000r/clawgs && cd clawgs
-# Requires Rust 1.85 or newer.
+# Requires Rust 1.88 or newer.
 bash scripts/install.sh
 bash scripts/check.sh
 target/release/clawgs demo extract --tool codex --pretty

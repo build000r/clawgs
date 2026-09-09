@@ -115,6 +115,7 @@ fn sample_session(now: chrono::DateTime<Utc>) -> SessionSnapshot {
         token_count: 144_379,
         context_limit: 256_000,
         last_activity_at: now - Duration::seconds(1),
+        last_input_started_at: None,
         rest_state: RestState::Active,
         commit_candidate: true,
         action_cues: vec![commit_ready_cue()],
@@ -366,6 +367,31 @@ fn emit_sync_request_validates() {
     let instance = serde_json::to_value(request).expect("serialize sync request");
 
     validate(&schema, &instance);
+}
+
+#[test]
+fn causal_timestamp_fields_match_v2_schemas() {
+    let emit = load_json(include_str!("../references/clawgs.emit.v2.schema.json"));
+    let now = Utc::now();
+    let mut session = sample_session(now);
+    session.last_input_started_at = Some(now);
+    let mut request = serde_json::to_value(SyncRequest::new(
+        "causal-schema",
+        now,
+        ThoughtConfig::default(),
+        vec![session],
+    ))
+    .expect("serialize request");
+    validate(&emit, &request);
+    request["sessions"][0]["last_input_started_at"] = serde_json::json!(42);
+    assert!(!validation_errors(&emit, &request).is_empty());
+
+    let extract = load_json(include_str!("../references/clawgs.v2.schema.json"));
+    let mut snapshot = extract_fixture(AgentTool::Codex, &fixture_path("codex-current.jsonl"));
+    snapshot["snapshot"]["last_user_turn_at"] = serde_json::json!(now);
+    validate(&extract, &snapshot);
+    snapshot["snapshot"]["last_user_turn_at"] = serde_json::json!(42);
+    assert!(!validation_errors(&extract, &snapshot).is_empty());
 }
 
 #[test]

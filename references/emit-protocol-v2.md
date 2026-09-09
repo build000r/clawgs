@@ -46,6 +46,35 @@ canonical backend as `grok`.
 
 ## Success Response
 
+An update's `at` uses the request's `now`; it is not the wall-clock time when
+transcript parsing or response delivery finished. Consumers that invalidate cues
+on newer terminal activity should bind updates to the corresponding request.
+After a successful fresh transcript parse, unchanged passive or sleeping cues
+are emitted again when the request's activity has advanced beyond the last
+emitted observation. Subsequent ticks with unchanged activity remain deduplicated.
+This refresh does not itself request new model prose or reset model cadence.
+An empty response does not authorize a consumer to refresh a cached cue's binding.
+
+Clients delivering input must send optional `sessions[].last_input_started_at`
+as the UTC time captured before delivery began, advancing it only after actual
+successful delivery. This is distinct from output activity. Until a fresh
+transcript's latest genuine user turn has `last_user_turn_at >=
+last_input_started_at`, the emitter suppresses waiting, sleep, action cues and
+commit readiness. Missing or malformed user timestamps cannot authorize them;
+Claude tool-result-only records do not count as user input. A user turn and its
+final answer can both arrive between polls without losing this causal check.
+Input-bound changes are reported through the existing `activity` delta field. Recovery may supply a
+conservative bound from uncertain input intent or legacy bootstrap; this field
+is then a requirement for transcript coverage, not proof that bytes were
+successfully delivered or that the current pane was their recipient.
+
+Deploy the companion emitter update before a consumer starts sending this field.
+Older emitters reject unknown session fields; optional/defaulted fields allow
+older requests against the updated emitter, not newer requests against an old
+emitter. Consumers must retain conservative input fences when the delivery pane
+cannot be established. No timing tolerance substitutes for transcript coverage.
+
+
 ```json
 {
   "type": "sync_result",

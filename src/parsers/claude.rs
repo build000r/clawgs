@@ -36,6 +36,7 @@ struct ClaudeParseState {
     token_count: u64,
     awaiting_user_input: bool,
     awaiting_user_text: Option<String>,
+    last_user_turn_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl ClaudeParseState {
@@ -47,11 +48,18 @@ impl ClaudeParseState {
             token_count: 0,
             awaiting_user_input: false,
             awaiting_user_text: None,
+            last_user_turn_at: None,
         }
     }
 
     fn ingest(&mut self, entry: &Value, options: &ExtractOptions) {
         let ts = extract_timestamp(entry);
+        if is_input_bearing_user_turn(entry) {
+            self.last_user_turn_at = ts
+                .as_deref()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&chrono::Utc));
+        }
         update_user_task(entry, options, &mut self.user_task);
         update_token_count(entry, &mut self.token_count);
         update_awaiting_user_state(
@@ -76,6 +84,7 @@ impl ClaudeParseState {
             token_count: self.token_count,
             awaiting_user_input: self.awaiting_user_input,
             awaiting_user_text: self.awaiting_user_text,
+            last_user_turn_at: self.last_user_turn_at,
             commit_signal: None,
             events_seen: stats.events_seen,
             malformed_lines_skipped: stats.malformed_lines_skipped,
@@ -119,6 +128,30 @@ fn update_token_count(entry: &Value, token_count: &mut u64) {
     {
         *token_count = value;
     }
+}
+
+fn is_input_bearing_user_turn(entry: &Value) -> bool {
+    if entry_type(entry) != "user" {
+        return false;
+    }
+    let Some(content) = user_message(message(entry)).and_then(|message| message.get("content"))
+    else {
+        return false;
+    };
+    let genuine_text = |text: &str| !text.trim().is_empty() && !is_harness_markup(text);
+    content.as_str().is_some_and(genuine_text)
+        || content.as_array().is_some_and(|blocks| {
+            blocks
+                .iter()
+                .any(|block| match block.get("type").and_then(Value::as_str) {
+                    Some("image") => true,
+                    Some("text") => block
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .is_some_and(genuine_text),
+                    _ => false,
+                })
+        })
 }
 
 fn update_awaiting_user_state(
@@ -598,5 +631,34 @@ mod tests {
         };
         let snapshot = parse(file.path(), &options).expect("parse");
         assert_eq!(snapshot.awaiting_user_text.as_deref(), Some("abcd"));
+    }
+
+    #[test]
+    fn user_turn_watermark_excludes_tool_results_and_clears_on_untimed_input() {
+        let mut state = ClaudeParseState::new();
+        let options = ExtractOptions::default();
+        state.ingest(&serde_json::json!({"type":"user","timestamp":"2026-09-08T12:00:00Z","message":{"role":"user","content":"go"}}), &options);
+        let initial = state.last_user_turn_at;
+        assert!(initial.is_some());
+        state.ingest(&serde_json::json!({"type":"user","timestamp":"2026-09-08T12:00:10Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool1","content":"done"}]}}), &options);
+        assert_eq!(state.last_user_turn_at, initial);
+        state.ingest(&serde_json::json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":"next"}]}}), &options);
+        assert!(state.last_user_turn_at.is_none());
+        state.ingest(&serde_json::json!({"type":"user","timestamp":"invalid","message":{"role":"user","content":"again"}}), &options);
+        assert!(state.last_user_turn_at.is_none());
+    }
+    #[test]
+    fn harness_user_text_does_not_cover_real_input_bound() {
+        let mut state = ClaudeParseState::new();
+        let options = ExtractOptions::default();
+        state.ingest(&serde_json::json!({"type":"user","timestamp":"2026-09-08T12:00:00Z","message":{"role":"user","content":"go"}}), &options);
+        let original = state.last_user_turn_at;
+        for content in [
+            serde_json::json!("<system-reminder>automatic</system-reminder>"),
+            serde_json::json!([{"type":"text","text":"<system-reminder>automatic</system-reminder>"}]),
+        ] {
+            state.ingest(&serde_json::json!({"type":"user","timestamp":"2026-09-08T12:00:10Z","message":{"role":"user","content":content}}), &options);
+            assert_eq!(state.last_user_turn_at, original);
+        }
     }
 }

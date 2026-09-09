@@ -131,6 +131,7 @@ fn demo_sync_request() -> SyncRequest {
             token_count: 144_379,
             context_limit: 256_000,
             last_activity_at: now - Duration::seconds(2),
+            last_input_started_at: None,
             rest_state: RestState::Active,
             commit_candidate: true,
             action_cues: vec![demo_commit_ready_cue()],

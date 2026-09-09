@@ -31,6 +31,7 @@ When `--input` is omitted, discovery is local and cwd-exact:
 ## snapshot
 
 - `user_task` (`string | null`): latest detected user prompt/task
+- `last_user_turn_at` (`string | null`, optional): UTC timestamp of the latest genuine input-bearing user turn. Claude tool-result-only messages do not advance it. A latest user turn with a missing or malformed timestamp clears it; an older timestamp is never retained as evidence for that turn.
 - `current_tool` (`Action | null`): latest detected tool/thinking action
 - `token_count` (`number`): latest observed `input_tokens`
 - `awaiting_user_input` (`boolean`, optional): present and `true` when the latest transcript state appears to be waiting for the user

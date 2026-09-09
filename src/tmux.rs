@@ -137,6 +137,7 @@ impl TmuxScanTracker {
             token_count: 0,
             context_limit: 0,
             last_activity_at,
+            last_input_started_at: None,
             rest_state: RestState::Active,
             commit_candidate: false,
             action_cues: Vec::new(),
@@ -186,8 +187,7 @@ impl Default for TmuxScanTracker {
 
 fn list_tmux_panes(tmux_bin: &str) -> Result<String> {
     let format = format!(
-        "#{{session_name}}{sep}#{{window_index}}{sep}#{{pane_index}}{sep}#{{pane_id}}{sep}#{{pane_current_path}}{sep}#{{pane_current_command}}{sep}#{{?pane_dead,1,0}}",
-        sep = FIELD_SEP
+        "#{{session_name}}{FIELD_SEP}#{{window_index}}{FIELD_SEP}#{{pane_index}}{FIELD_SEP}#{{pane_id}}{FIELD_SEP}#{{pane_current_path}}{FIELD_SEP}#{{pane_current_command}}{FIELD_SEP}#{{?pane_dead,1,0}}"
     );
 
     let output = Command::new(tmux_bin)
@@ -322,6 +322,7 @@ fn exited_snapshot(session_id: &str, tracked: &TrackedSession) -> SessionSnapsho
         token_count: 0,
         context_limit: 0,
         last_activity_at: tracked.last_activity_at,
+        last_input_started_at: None,
         rest_state: RestState::DeepSleep,
         commit_candidate: false,
         action_cues: Vec::new(),

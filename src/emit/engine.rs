@@ -165,7 +165,9 @@ fn session_changed_fields(
     if previous.replay_fingerprint != current.replay_fingerprint {
         fields.push(SessionDeltaField::ReplayText);
     }
-    if previous.last_activity_at != current.last_activity_at {
+    if previous.last_activity_at != current.last_activity_at
+        || previous.last_input_started_at != current.last_input_started_at
+    {
         fields.push(SessionDeltaField::Activity);
     }
 
@@ -179,6 +181,7 @@ struct SessionRuntimeState {
     run_started_at: DateTime<Utc>,
     run_finished_at: Option<DateTime<Utc>>,
     last_emitted_thought: Option<String>,
+    last_emitted_activity_at: Option<DateTime<Utc>>,
     sleeping_emitted: bool,
     thought_state: ThoughtState,
     thought_source: ThoughtSource,
@@ -201,6 +204,7 @@ struct ObservedSessionFacts {
     cwd: String,
     replay_fingerprint: u64,
     last_activity_at: DateTime<Utc>,
+    last_input_started_at: Option<DateTime<Utc>>,
 }
 
 impl ObservedSessionFacts {
@@ -212,6 +216,7 @@ impl ObservedSessionFacts {
             cwd: session.cwd.clone(),
             replay_fingerprint: hash_string(&session.replay_text),
             last_activity_at: session.last_activity_at,
+            last_input_started_at: session.last_input_started_at,
         }
     }
 }
@@ -233,6 +238,7 @@ impl SessionRuntimeState {
             run_started_at,
             run_finished_at: initial_run_finished_at(session, now),
             last_emitted_thought: session.thought.clone(),
+            last_emitted_activity_at: None,
             sleeping_emitted: session.thought_state == ThoughtState::Sleeping
                 && matches!(
                     session.rest_state,
@@ -492,11 +498,12 @@ impl EmitEngine {
             }
 
             invalidate_stale_claim(state, session);
-            let (context_snapshot, resolved_path) = context_snapshot_for_session_with_claim(
+            let (mut context_snapshot, resolved_path) = context_snapshot_for_session_with_claim(
                 session,
                 state.claimed_jsonl_path.as_deref(),
                 transcript_group_is_ambiguous(session, transcript_group_counts),
             );
+            enforce_input_causality(&mut context_snapshot, session);
             let context_source = context_source_for_snapshot(context_snapshot.as_ref());
             store_resolved_claim(state, session, resolved_path);
             let next_rest_state =
@@ -668,11 +675,12 @@ fn process_session(
 
     invalidate_stale_claim(state, session);
 
-    let (context_snapshot, resolved_path) = context_snapshot_for_session_with_claim(
+    let (mut context_snapshot, resolved_path) = context_snapshot_for_session_with_claim(
         session,
         state.claimed_jsonl_path.as_deref(),
         transcript_group_is_ambiguous(session, transcript_group_counts),
     );
+    enforce_input_causality(&mut context_snapshot, session);
     let context_source = context_source_for_snapshot(context_snapshot.as_ref());
     store_resolved_claim(state, session, resolved_path);
     let next_rest_state = rest_state_for_session(session, context_snapshot.as_ref(), request.now);
@@ -1142,7 +1150,14 @@ fn handle_sleeping_session(
 
     let carried_thought = sleeping_thought_for_update(state, session, context_snapshot);
     let carried_source = sleeping_thought_source(state);
-    let should_emit_sleeping = sleeping_emit_needed(
+    let should_emit_sleeping = fresh_operational_observation_needed(
+        state,
+        session,
+        context_source,
+        next_rest_state,
+        next_commit_candidate,
+        next_action_cues,
+    ) || sleeping_emit_needed(
         state,
         next_rest_state,
         next_commit_candidate,
@@ -1283,6 +1298,24 @@ fn clear_thought_update(
     )
 }
 
+// A new request may follow terminal output that invalidated the previous
+// delivery. Only a freshly parsed transcript can refresh unchanged operational
+// cues; cached inbound cues without a transcript must not acquire a new bound.
+fn fresh_operational_observation_needed(
+    state: &SessionRuntimeState,
+    session: &SessionSnapshot,
+    context_source: ContextSource,
+    rest_state: RestState,
+    commit_candidate: bool,
+    action_cues: &[ActionCue],
+) -> bool {
+    matches!(context_source, ContextSource::Transcript)
+        && (is_sleeping_rest_state(rest_state) || commit_candidate || !action_cues.is_empty())
+        && state
+            .last_emitted_activity_at
+            .is_none_or(|previous| session.last_activity_at > previous)
+}
+
 fn emit_passive_state_change_if_needed(
     updates: &mut Vec<ThoughtUpdate>,
     stream_instance_id: &str,
@@ -1303,6 +1336,14 @@ fn emit_passive_state_change_if_needed(
         && state.commit_candidate == next_commit_candidate
         && state.action_cues.as_slice() == next_action_cues
         && !first_observation_has_visible_state
+        && !fresh_operational_observation_needed(
+            state,
+            session,
+            context_source,
+            next_rest_state,
+            next_commit_candidate,
+            next_action_cues,
+        )
     {
         return false;
     }
@@ -1401,6 +1442,7 @@ fn thought_update(
     context_source: ContextSource,
     cadence_multiplier: u64,
 ) -> ThoughtUpdate {
+    state.last_emitted_activity_at = Some(session.last_activity_at);
     ThoughtUpdate {
         session_id: session.session_id.clone(),
         stream_instance_id: Some(stream_instance_id.to_string()),
@@ -1428,6 +1470,23 @@ fn thought_update(
     }
 }
 
+fn enforce_input_causality(context: &mut Option<Snapshot>, session: &SessionSnapshot) {
+    let Some(input_at) = session.last_input_started_at else {
+        return;
+    };
+    if let Some(snapshot) = context {
+        if snapshot
+            .last_user_turn_at
+            .is_none_or(|user_at| user_at < input_at)
+        {
+            snapshot.awaiting_user_input = false;
+            snapshot.awaiting_user_text = None;
+            snapshot.action_cues.clear();
+            snapshot.commit_signal = None;
+        }
+    }
+}
+
 fn rest_state_for_session(
     session: &SessionSnapshot,
     context_snapshot: Option<&Snapshot>,
@@ -1439,6 +1498,7 @@ fn rest_state_for_session(
             RestState::Sleeping
         }
         _ if context_snapshot.is_none()
+            && session.last_input_started_at.is_none()
             && ActionCue::contains_valid_kind(
                 &session.action_cues,
                 ActionCueKind::AwaitingUser,
@@ -1467,8 +1527,12 @@ fn commit_candidate_for_context(
             .as_ref()
             .is_some_and(|signal| signal.candidate),
         None => {
-            session.commit_candidate
-                || ActionCue::contains_valid_kind(&session.action_cues, ActionCueKind::CommitReady)
+            session.last_input_started_at.is_none()
+                && (session.commit_candidate
+                    || ActionCue::contains_valid_kind(
+                        &session.action_cues,
+                        ActionCueKind::CommitReady,
+                    ))
         }
     }
 }
@@ -1483,7 +1547,13 @@ fn action_cues_for_context(
 
     context_snapshot
         .map(|snapshot| snapshot.action_cues.clone())
-        .unwrap_or_else(|| ActionCue::valid_from(&session.action_cues))
+        .unwrap_or_else(|| {
+            if session.last_input_started_at.is_none() {
+                ActionCue::valid_from(&session.action_cues)
+            } else {
+                Vec::new()
+            }
+        })
 }
 
 fn clear_rest_state_for_session(session: &SessionSnapshot, now: DateTime<Utc>) -> RestState {
@@ -2455,6 +2525,7 @@ mod tests {
             token_count: 1000,
             context_limit: 192_000,
             last_activity_at: now,
+            last_input_started_at: None,
             rest_state: RestState::Active,
             commit_candidate: false,
             action_cues: Vec::new(),
@@ -2553,6 +2624,7 @@ mod tests {
             token_count: 42,
             awaiting_user_input: false,
             awaiting_user_text: None,
+            last_user_turn_at: None,
             recent_actions: Vec::new(),
             commit_signal: None,
             action_cues: Vec::new(),
@@ -2646,6 +2718,7 @@ mod tests {
             token_count: 0,
             awaiting_user_input: false,
             awaiting_user_text: None,
+            last_user_turn_at: None,
             recent_actions: Vec::new(),
             commit_signal: Some(crate::CommitSignal::default()),
             action_cues: Vec::new(),
@@ -3251,6 +3324,7 @@ mod tests {
             token_count: 0,
             awaiting_user_input: true,
             awaiting_user_text: Some("Need your approval to continue.".to_string()),
+            last_user_turn_at: None,
             recent_actions: Vec::new(),
             commit_signal: None,
             action_cues: Vec::new(),
@@ -3277,6 +3351,7 @@ mod tests {
             token_count: 42,
             awaiting_user_input: true,
             awaiting_user_text: Some("Need your decision on the migration.".to_string()),
+            last_user_turn_at: None,
             recent_actions: Vec::new(),
             commit_signal: None,
             action_cues: Vec::new(),
@@ -4253,6 +4328,270 @@ mod tests {
         assert!(
             engine.per_session.contains_key(&session.session_id),
             "carry-forward must initialize per-session state for unknown sessions"
+        );
+    }
+
+    #[test]
+    fn fresh_transcript_waiting_reemits_once_for_new_activity_in_normal_and_fallback_paths() {
+        for fallback in [false, true] {
+            let temp = tempdir().unwrap();
+            let path = temp.path().join("own-transcript.jsonl");
+            let waiting = concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/project\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Ready for next input\"}]}}\n"
+            );
+            fs::write(&path, waiting).unwrap();
+            let now = Utc::now();
+            let mut engine = mock_engine("working after resume");
+            let mut session = sample_session(now);
+            session.tool = Some("codex".into());
+            let mut state = SessionRuntimeState::initialize_from_session(&session, now);
+            state.claimed_jsonl_path = Some(path.clone());
+            state.claimed_cwd = Some(session.cwd.clone());
+            engine.per_session.insert(session.session_id.clone(), state);
+            let run = |engine: &mut EmitEngine, session: &SessionSnapshot, tick: i64| {
+                let request = SyncRequest {
+                    id: format!("refresh-{tick}"),
+                    now: now + Duration::seconds(tick),
+                    config: ThoughtConfig::default(),
+                    sessions: vec![session.clone()],
+                };
+                if fallback {
+                    let mut updates = Vec::new();
+                    let mut metrics = SyncMetrics::default();
+                    engine.carry_forward_sessions(
+                        &request,
+                        &HashMap::new(),
+                        1,
+                        &mut updates,
+                        &mut metrics,
+                    );
+                    (updates, metrics.llm_calls)
+                } else {
+                    let result = engine.sync(&request);
+                    (result.updates, result.metrics.llm_calls)
+                }
+            };
+            let (first, calls) = run(&mut engine, &session, 0);
+            assert_eq!(first.len(), 1, "fallback={fallback}");
+            assert_eq!(first[0].action_cues, vec![awaiting_user_cue()]);
+            assert_eq!(calls, 0);
+            assert!(run(&mut engine, &session, 1).0.is_empty());
+            session.last_activity_at = now + Duration::seconds(2);
+            let (refreshed, calls) = run(&mut engine, &session, 3);
+            assert_eq!(
+                refreshed.len(),
+                1,
+                "new request activity must refresh fresh waiting: fallback={fallback}"
+            );
+            assert_eq!(refreshed[0].action_cues, first[0].action_cues);
+            assert_eq!(refreshed[0].emission_seq, Some(2));
+            assert_eq!(calls, 0, "refresh does not generate prose");
+            assert_eq!(
+                engine.per_session[&session.session_id].last_emitted_activity_at,
+                Some(session.last_activity_at)
+            );
+            assert!(run(&mut engine, &session, 4).0.is_empty());
+            session.last_activity_at = now;
+            assert!(
+                run(&mut engine, &session, 4).0.is_empty(),
+                "older activity cannot refresh authority"
+            );
+            session.last_input_started_at = Some(now + Duration::seconds(5));
+            session.last_activity_at = now + Duration::seconds(5);
+            let (pending_input, _) = run(&mut engine, &session, 5);
+            assert!(
+                !pending_input.is_empty(),
+                "delivered input must clear prior waiting before transcript append"
+            );
+            assert!(pending_input
+                .iter()
+                .all(|update| update.action_cues.is_empty() && !update.commit_candidate));
+            assert_eq!(
+                engine.per_session[&session.session_id].rest_state,
+                RestState::Active,
+                "fresh read of old final must not revive waiting after input: fallback={fallback}"
+            );
+            fs::write(&path, format!("{waiting}{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"continue\"}}}}\n")).unwrap();
+            session.last_activity_at = now + Duration::seconds(5);
+            let (resumed, _) = run(&mut engine, &session, 5);
+            // Input already cleared waiting; an unchanged active result may deduplicate.
+            assert!(resumed.iter().all(|update| !update
+                .action_cues
+                .iter()
+                .any(|cue| cue.kind == ActionCueKind::AwaitingUser)));
+            assert_eq!(
+                engine.per_session[&session.session_id].rest_state,
+                RestState::Active
+            );
+        }
+    }
+
+    #[test]
+    fn unavailable_transcript_cannot_refresh_cached_waiting_under_new_activity() {
+        let temp = tempdir().unwrap();
+        let now = Utc::now();
+        let mut session = sample_session(now);
+        session.tool = Some("codex".into());
+        session.action_cues = vec![awaiting_user_cue()];
+        session.rest_state = RestState::Sleeping;
+        session.thought_state = ThoughtState::Sleeping;
+        for claimed in [temp.path().join("missing.jsonl"), temp.path().to_path_buf()] {
+            // Ambiguous fallback prevents discovery beyond our owned fixture.
+            let (context, _) =
+                context_snapshot_for_session_with_claim(&session, Some(&claimed), true);
+            assert!(
+                context.is_none(),
+                "missing file or unreadable directory is not transcript evidence"
+            );
+            let mut state = SessionRuntimeState::initialize_from_session(&session, now);
+            state.emission_seq = 1;
+            state.last_emitted_activity_at = Some(now);
+            session.last_activity_at = now + Duration::seconds(1);
+            let mut updates = Vec::new();
+            let changed = emit_passive_state_change_if_needed(
+                &mut updates,
+                "stream",
+                &mut state,
+                &session,
+                &ThoughtConfig::default(),
+                context_source_for_snapshot(context.as_ref()),
+                RestState::Sleeping,
+                false,
+                &session.action_cues,
+                now + Duration::seconds(2),
+                1,
+            );
+            assert!(!changed);
+            assert!(updates.is_empty());
+            assert_eq!(state.last_emitted_activity_at, Some(now));
+            let mut metrics = SyncMetrics::default();
+            assert!(handle_sleeping_session(
+                "stream",
+                &mut state,
+                &session,
+                None,
+                &ThoughtConfig::default(),
+                ContextSource::Terminal,
+                now + Duration::seconds(2),
+                RestState::Sleeping,
+                false,
+                &session.action_cues,
+                &mut updates,
+                1,
+                &mut metrics,
+            ));
+            assert!(
+                updates.is_empty(),
+                "normal sleeping path must not refresh cached authority either"
+            );
+            assert_eq!(state.last_emitted_activity_at, Some(now));
+        }
+    }
+
+    #[test]
+    fn causal_guard_requires_input_covering_user_turn_and_preserves_fast_reply() {
+        let now = Utc::now();
+        let mut session = sample_session(now);
+        session.last_input_started_at = Some(now);
+        session.action_cues = vec![awaiting_user_cue()];
+        session.commit_candidate = true;
+        assert!(action_cues_for_context(None, &session).is_empty());
+        assert!(!commit_candidate_for_context(None, &session));
+        assert_eq!(
+            rest_state_for_session(&session, None, now),
+            RestState::Active
+        );
+        for user_at in [None, Some(now - Duration::seconds(1)), Some(now)] {
+            let mut context = Some(Snapshot {
+                user_task: Some("historical context".into()),
+                current_tool: None,
+                token_count: 1,
+                awaiting_user_input: true,
+                awaiting_user_text: Some("done".into()),
+                last_user_turn_at: user_at,
+                recent_actions: vec![],
+                commit_signal: Some(crate::CommitSignal {
+                    candidate: true,
+                    ..Default::default()
+                }),
+                action_cues: vec![awaiting_user_cue()],
+            });
+            enforce_input_causality(&mut context, &session);
+            let snapshot = context.as_ref().unwrap();
+            assert_eq!(snapshot.user_task.as_deref(), Some("historical context"));
+            assert_eq!(snapshot.awaiting_user_input, user_at == Some(now));
+            assert_eq!(
+                commit_candidate_for_context(context.as_ref(), &session),
+                user_at == Some(now)
+            );
+            assert_eq!(!snapshot.action_cues.is_empty(), user_at == Some(now));
+        }
+        let jsonl = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"cwd\":\"/tmp/project\"}}}}\n{{\"type\":\"event_msg\",\"timestamp\":\"{}\",\"payload\":{{\"type\":\"user_message\",\"message\":\"next\"}}}}\n{{\"type\":\"response_item\",\"timestamp\":\"{}\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{{\"type\":\"output_text\",\"text\":\"done\"}}]}}}}\n",
+            now.to_rfc3339(), (now + Duration::milliseconds(1)).to_rfc3339()
+        );
+        let snapshot = crate::extract_jsonl_str(
+            AgentTool::Codex,
+            "owned-fast-reply",
+            &jsonl,
+            Path::new("/tmp/project"),
+            false,
+            &ExtractOptions::default(),
+        )
+        .unwrap()
+        .snapshot;
+        let mut context = Some(snapshot);
+        enforce_input_causality(&mut context, &session);
+        assert!(
+            context.as_ref().unwrap().awaiting_user_input,
+            "user and final between polls remain observable"
+        );
+        assert_eq!(
+            action_cues_for_context(context.as_ref(), &session),
+            vec![awaiting_user_cue()]
+        );
+        // A conservative unknown-target fence can survive a pane/CWD switch.
+        // A genuine new-pane user turn covering it restores authority normally.
+        session.cwd = "/tmp/new-pane".into();
+        let new_pane_jsonl = jsonl.replace("/tmp/project", &session.cwd);
+        let mut new_context = Some(
+            crate::extract_jsonl_str(
+                AgentTool::Codex,
+                "owned-new-pane",
+                &new_pane_jsonl,
+                Path::new(&session.cwd),
+                false,
+                &ExtractOptions::default(),
+            )
+            .unwrap()
+            .snapshot,
+        );
+        enforce_input_causality(&mut new_context, &session);
+        assert_eq!(
+            session.last_input_started_at,
+            Some(now),
+            "pane switch did not lower the fence"
+        );
+        assert_eq!(
+            action_cues_for_context(new_context.as_ref(), &session),
+            vec![awaiting_user_cue()]
+        );
+    }
+    #[test]
+    fn input_bound_change_is_an_activity_delta_without_output_timestamp_change() {
+        let now = Utc::now();
+        let mut session = sample_session(now);
+        let before = ObservedSessionFacts::from_session(&session);
+        session.last_input_started_at = Some(now);
+        let after = ObservedSessionFacts::from_session(&session);
+        assert_eq!(
+            session_changed_fields(Some(&before), &after),
+            vec![SessionDeltaField::Activity]
+        );
+        assert_eq!(
+            session_changed_fields(Some(&after), &before),
+            vec![SessionDeltaField::Activity]
         );
     }
 }

@@ -45,6 +45,7 @@ struct CodexParseState {
     token_count: u64,
     awaiting_user_input: bool,
     awaiting_user_text: Option<String>,
+    last_user_turn_at: Option<chrono::DateTime<chrono::Utc>>,
     pending_validation_commands: HashMap<String, String>,
     pending_validation_sessions: HashMap<String, String>,
     pending_dirty_check_commands: HashSet<String>,
@@ -61,6 +62,7 @@ impl CodexParseState {
             token_count: 0,
             awaiting_user_input: false,
             awaiting_user_text: None,
+            last_user_turn_at: None,
             pending_validation_commands: HashMap::new(),
             pending_validation_sessions: HashMap::new(),
             pending_dirty_check_commands: HashSet::new(),
@@ -71,6 +73,12 @@ impl CodexParseState {
 
     fn ingest(&mut self, entry: &Value, options: &ExtractOptions) {
         let ts = extract_timestamp(entry);
+        if is_input_bearing_user_turn(entry) {
+            self.last_user_turn_at = ts
+                .as_deref()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&chrono::Utc));
+        }
         update_user_task(entry, options, &mut self.user_task);
         update_token_count(entry, &mut self.token_count);
         update_awaiting_user_state(
@@ -139,6 +147,7 @@ impl CodexParseState {
             token_count: self.token_count,
             awaiting_user_input: self.awaiting_user_input,
             awaiting_user_text: self.awaiting_user_text,
+            last_user_turn_at: self.last_user_turn_at,
             commit_signal: Some(self.commit_signal),
             events_seen: stats.events_seen,
             malformed_lines_skipped: stats.malformed_lines_skipped,
@@ -182,6 +191,24 @@ fn is_user_turn_entry(entry: &Value) -> bool {
         "event_msg" => payload(entry).get("type").and_then(Value::as_str) == Some("user_message"),
         _ => false,
     }
+}
+
+fn is_input_bearing_user_turn(entry: &Value) -> bool {
+    if !is_user_turn_entry(entry) {
+        return false;
+    }
+    if user_task_text(entry).is_some() {
+        return true;
+    }
+    entry_type(entry) == "response_item"
+        && payload(entry)
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|blocks| {
+                blocks
+                    .iter()
+                    .any(|block| block.get("type").and_then(Value::as_str) == Some("input_image"))
+            })
 }
 
 fn user_response_item_text(payload: &Value) -> Option<String> {
@@ -1279,8 +1306,7 @@ mod tests {
         fs::write(
             file.path(),
             format!(
-                "{{\"type\":\"response_item\",\"payload\":{{\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"{oversized}\"}}]}}}}\n",
-                oversized = oversized
+                "{{\"type\":\"response_item\",\"payload\":{{\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"{oversized}\"}}]}}}}\n"
             ),
         )
         .expect("write fixture");
@@ -1929,5 +1955,36 @@ mod tests {
         };
         let snapshot = parse(file.path(), &options).expect("parse");
         assert_eq!(snapshot.awaiting_user_text.as_deref(), Some("abcd"));
+    }
+
+    #[test]
+    fn latest_user_turn_timestamp_replaces_prior_even_when_missing_or_malformed() {
+        let mut state = CodexParseState::new();
+        let options = ExtractOptions::default();
+        for entry in [
+            serde_json::json!({"type":"event_msg","timestamp":"2026-09-08T12:00:00Z","payload":{"type":"user_message","message":"go"}}),
+            serde_json::json!({"type":"response_item","timestamp":"2026-09-08T12:00:01Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}}),
+        ] {
+            state.ingest(&entry, &options);
+            assert!(state.last_user_turn_at.is_some());
+        }
+        state.ingest(&serde_json::json!({"type":"event_msg","payload":{"type":"user_message","message":"untimed"}}), &options);
+        assert!(state.last_user_turn_at.is_none());
+        state.ingest(&serde_json::json!({"type":"event_msg","timestamp":"bad-time","payload":{"type":"user_message","message":"bad clock"}}), &options);
+        assert!(state.last_user_turn_at.is_none());
+    }
+    #[test]
+    fn harness_user_records_do_not_advance_input_authority_watermark() {
+        let mut state = CodexParseState::new();
+        let options = ExtractOptions::default();
+        state.ingest(&serde_json::json!({"type":"event_msg","timestamp":"2026-09-08T12:00:00Z","payload":{"type":"user_message","message":"go"}}), &options);
+        let original = state.last_user_turn_at;
+        for entry in [
+            serde_json::json!({"type":"event_msg","timestamp":"2026-09-08T12:00:10Z","payload":{"type":"user_message","message":"<system-reminder>automated reminder</system-reminder>"}}),
+            serde_json::json!({"type":"response_item","timestamp":"2026-09-08T12:00:11Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<system-reminder>automated reminder</system-reminder>"}]}}),
+        ] {
+            state.ingest(&entry, &options);
+            assert_eq!(state.last_user_turn_at, original);
+        }
     }
 }

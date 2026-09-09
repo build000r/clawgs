@@ -78,6 +78,10 @@
         "awaiting_user_text": {
           "type": ["string", "null"]
         },
+        "last_user_turn_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
         "recent_actions": {
           "type": "array",
           "items": {

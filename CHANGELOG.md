@@ -23,6 +23,14 @@ delta facts, and Claude Code hook wake-ups explicit.
 
 ### Live Backend
 
+- Add optional `last_input_started_at` to emitter session requests and
+  `last_user_turn_at` to extracted snapshots. Suppress operational cues until
+  the transcript covers delivered input. Upgrade the emitter before consumers
+  send the new request field: older emitters reject unknown session fields.
+
+- Refresh unchanged passive and sleeping observations after newer client
+  activity, using a fresh transcript parse. This lets downstream UIs recover
+  when output overtakes an earlier request without resetting model cadence.
 - Replaced the local Claude/Codex CLI thought backend implementations with a
   Grok headless backend.
 - Kept `openrouter` as a supported backend.

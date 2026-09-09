@@ -20,6 +20,7 @@ pub(crate) struct ParseSnapshot {
     pub token_count: u64,
     pub awaiting_user_input: bool,
     pub awaiting_user_text: Option<String>,
+    pub last_user_turn_at: Option<DateTime<chrono::Utc>>,
     pub commit_signal: Option<CommitSignal>,
     pub events_seen: u64,
     pub malformed_lines_skipped: u64,
